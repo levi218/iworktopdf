@@ -58,7 +58,8 @@ const RIGHT_LABEL_GAP: f32 = 12.24;
 /// Stroke width of series lines and line swatches.
 const LINE_WIDTH: f32 = 1.7309;
 
-/// Chart types (ChartArchive.type).
+/// Chart types (ChartArchive.type). Apple's PDF export draws the 3D types (12-19) flat, like
+/// their 2D counterparts, so they map to the same variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChartType {
     Column,
@@ -70,6 +71,8 @@ enum ChartType {
     StackedBar,
     StackedArea,
     TwoAxis,
+    /// Columns and lines sharing one value axis (drawn like `TwoAxis` without its right axis).
+    Mixed,
     Interactive,
     InteractiveBar,
     Donut,
@@ -79,20 +82,26 @@ enum ChartType {
 impl ChartType {
     fn from_stored(value: i32) -> ChartType {
         match value {
-            1 => ChartType::Column,
-            2 => ChartType::Bar,
-            3 => ChartType::Line,
-            4 => ChartType::Area,
-            5 => ChartType::Pie,
-            6 => ChartType::StackedColumn,
-            7 => ChartType::StackedBar,
-            8 => ChartType::StackedArea,
+            1 | 12 => ChartType::Column,
+            2 | 13 => ChartType::Bar,
+            3 | 14 => ChartType::Line,
+            4 | 15 => ChartType::Area,
+            5 | 16 => ChartType::Pie,
+            6 | 17 => ChartType::StackedColumn,
+            7 | 18 => ChartType::StackedBar,
+            8 | 19 => ChartType::StackedArea,
+            10 => ChartType::Mixed,
             11 => ChartType::TwoAxis,
             20 => ChartType::Interactive,
             21 => ChartType::InteractiveBar,
             25 => ChartType::Donut,
             _ => ChartType::Other,
         }
+    }
+
+    /// Charts whose series are each drawn as columns or as a line.
+    fn is_combo(self) -> bool {
+        matches!(self, ChartType::TwoAxis | ChartType::Mixed)
     }
 
     fn is_pie(self) -> bool {
@@ -692,7 +701,11 @@ impl ChartItem {
         }
     }
 
+    /// The value axis a series is plotted against: always the left (0) one on a mixed chart.
     fn series_axis(&self, series: usize) -> usize {
+        if self.chart_type == ChartType::Mixed {
+            return 0;
+        }
         match self
             .series_property(series, 64)
             .filter(|props| props.has(64))
@@ -709,8 +722,8 @@ impl ChartItem {
     fn color_field(&self, series: usize) -> i32 {
         match self.chart_type {
             chart_type if chart_type.is_pie() => 17,
-            ChartType::TwoAxis if self.series_is_column(series) => 16,
-            ChartType::TwoAxis => 51,
+            chart_type if chart_type.is_combo() && self.series_is_column(series) => 16,
+            chart_type if chart_type.is_combo() => 51,
             chart_type => chart_type.fill_field(),
         }
     }
@@ -1044,7 +1057,7 @@ impl ChartItem {
             let color = self.series_color(index, self.color_field(index));
             let top = frame.top + 1.0;
             match self.chart_type {
-                ChartType::TwoAxis if !self.series_is_column(index) => {
+                chart_type if chart_type.is_combo() && !self.series_is_column(index) => {
                     draw_marker(
                         canvas,
                         (swatch_x + SWATCH / 2.0, top + SWATCH / 2.0).into(),
@@ -1219,7 +1232,7 @@ impl ChartItem {
             ChartType::Interactive | ChartType::InteractiveBar => {
                 return self.draw_interactive(canvas)
             }
-            ChartType::TwoAxis => return self.draw_two_axis(canvas),
+            ChartType::TwoAxis | ChartType::Mixed => return self.draw_two_axis(canvas),
             chart_type if chart_type.horizontal() => return self.draw_horizontal(canvas),
             _ => {}
         }
@@ -1520,12 +1533,17 @@ impl ChartItem {
             self.axis_label(0, value)
         });
         // Right-axis labels are right-aligned to their widest (measured: 12.24pt from the plot).
+        // A mixed chart has no right axis.
         let right_style = self.axis_style(true, 1);
         let right_font = right_style.font();
-        let right_labels: Vec<String> = right_scale
-            .values()
-            .map(|value| self.axis_label(1, value))
-            .collect();
+        let right_labels: Vec<String> = if self.chart_type == ChartType::TwoAxis {
+            right_scale
+                .values()
+                .map(|value| self.axis_label(1, value))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let widest_right = max_width(right_labels.iter(), &right_font);
         for (label, value) in right_labels.iter().zip(right_scale.values()) {
             let label_x =
@@ -2017,5 +2035,14 @@ mod tests {
         assert!(ChartType::from_stored(25).is_pie());
         assert!(ChartType::from_stored(7).horizontal() && ChartType::from_stored(7).stacked());
         assert_eq!(ChartType::from_stored(4).fill_field(), 11);
+    }
+
+    #[test]
+    fn three_d_types_draw_flat_and_mixed_is_combo() {
+        let flat: Vec<ChartType> = (12..=19).map(ChartType::from_stored).collect();
+        let two_d: Vec<ChartType> = (1..=8).map(ChartType::from_stored).collect();
+        assert_eq!(flat, two_d);
+        assert!(ChartType::from_stored(10).is_combo() && ChartType::from_stored(11).is_combo());
+        assert!(!ChartType::from_stored(1).is_combo());
     }
 }
