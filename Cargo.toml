@@ -1,0 +1,34 @@
+[package]
+name = "iwork2pdf"
+version = "0.1.0"
+edition = "2021"
+description = "Offline converter from Apple iWork documents (.numbers, .key, .pages) to PDF"
+
+[dependencies]
+# Error types for the library (thiserror) and the command line (anyhow).
+anyhow = "1.0"
+thiserror = "2.0"
+# Dates in cell formats (2001 epoch, ISO weeks).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# TIFF Deflate strips and the compare cache.
+flate2 = "1.1"
+# Progress bars for batch conversion and comparison.
+indicatif = "0.17"
+# Diagnostics (IWORK2PDF_VERBOSE=1 or RUST_LOG=debug).
+log = "0.4"
+env_logger = "0.11"
+# Rasterising PDFs (pasted artwork, acceptance comparison); needs libpdfium at run time.
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "sync"] }
+# CPU-bound parallel pixel comparison.
+rayon = "1.10"
+# HarfBuzz shaping of the document's exact fonts.
+rustybuzz = "0.20"
+# fonts/apple-metrics.json.
+serde_json = "1.0"
+# Drawing and the PDF backend (the same Skia SkiaSharp wraps).
+skia-safe = { version = "0.87", features = ["pdf"] }
+# Single-file documents and Index.zip.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+debug = 1
