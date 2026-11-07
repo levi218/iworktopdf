@@ -76,6 +76,14 @@ enum ChartType {
     Interactive,
     InteractiveBar,
     Donut,
+    /// Points at (X, Y) values (type 9; 23 interactive).
+    Scatter,
+    InteractiveScatter,
+    /// Scatter points sized by a third value (type 22; 24 interactive).
+    Bubble,
+    InteractiveBubble,
+    /// Series as closed polygons over one spoke per category (type 27).
+    Radar,
     Other,
 }
 
@@ -95,6 +103,11 @@ impl ChartType {
             20 => ChartType::Interactive,
             21 => ChartType::InteractiveBar,
             25 => ChartType::Donut,
+            9 => ChartType::Scatter,
+            22 => ChartType::Bubble,
+            23 => ChartType::InteractiveScatter,
+            24 => ChartType::InteractiveBubble,
+            27 => ChartType::Radar,
             _ => ChartType::Other,
         }
     }
@@ -102,6 +115,21 @@ impl ChartType {
     /// Charts whose series are each drawn as columns or as a line.
     fn is_combo(self) -> bool {
         matches!(self, ChartType::TwoAxis | ChartType::Mixed)
+    }
+
+    /// Charts plotting each point at an X and a Y value.
+    fn is_xy(self) -> bool {
+        matches!(
+            self,
+            ChartType::Scatter
+                | ChartType::InteractiveScatter
+                | ChartType::Bubble
+                | ChartType::InteractiveBubble
+        )
+    }
+
+    fn is_bubble(self) -> bool {
+        matches!(self, ChartType::Bubble | ChartType::InteractiveBubble)
     }
 
     fn is_pie(self) -> bool {
@@ -221,12 +249,13 @@ fn max_width<'a>(texts: impl Iterator<Item = &'a String>, font: &TaggedFont) -> 
         .fold(0.0, f32::max)
 }
 
-/// A quarter-magnitude multiple at or above raw (measured: 457,485 → 125,000 for four steps,
-/// 131,280 → 35,000, 82 → 22.5); above five units, a multiple of 2.5 (3.22 → 1.00 per step).
-fn nice_step(raw: f64) -> f64 {
+/// A multiple of `small_quantum` magnitudes at or above raw (measured with 0.25: 457,485 → 125,000
+/// for four steps, 131,280 → 35,000, 82 → 22.5); above five units, a multiple of 2.5 (3.22 → 1.00
+/// per step). A scatter chart's X axis steps by whole magnitudes (1.0: 15 → 4 per step).
+fn nice_step(raw: f64, small_quantum: f64) -> f64 {
     let magnitude = 10f64.powf(raw.log10().floor());
     let units = raw / magnitude;
-    let quantum = if units > 5.0 { 2.5 } else { 0.25 };
+    let quantum = if units > 5.0 { 2.5 } else { small_quantum };
     (units / quantum - 1e-9).ceil() * quantum * magnitude
 }
 
@@ -643,7 +672,13 @@ impl ChartItem {
             };
         }
         let maximum = if maximum <= 0.0 { 1.0 } else { maximum };
-        let step = nice_step(maximum / f64::from(steps));
+        // Axis 1 of a scatter or bubble chart is its X axis.
+        let small_quantum = if self.chart_type.is_xy() && axis == 1 {
+            1.0
+        } else {
+            0.25
+        };
+        let step = nice_step(maximum / f64::from(steps), small_quantum);
         Scale {
             top: step * f64::from(steps),
             step,
@@ -947,6 +982,8 @@ impl ChartItem {
     pub fn draw(&self, canvas: &Canvas) {
         if self.chart_type.is_pie() {
             self.draw_pie(canvas);
+        } else if self.chart_type == ChartType::Radar {
+            self.draw_radar(canvas);
         } else {
             self.draw_xy(canvas);
         }
@@ -991,6 +1028,11 @@ impl ChartItem {
     fn legend_entries(&self) -> Vec<String> {
         if self.chart_type.is_pie() {
             self.pie_names()
+        } else if self.chart_type.is_xy() {
+            self.y_series()
+                .iter()
+                .map(|&series| self.series[series].clone())
+                .collect()
         } else {
             self.series.clone()
         }
@@ -1233,6 +1275,7 @@ impl ChartItem {
                 return self.draw_interactive(canvas)
             }
             ChartType::TwoAxis | ChartType::Mixed => return self.draw_two_axis(canvas),
+            chart_type if chart_type.is_xy() => return self.draw_scatter(canvas),
             chart_type if chart_type.horizontal() => return self.draw_horizontal(canvas),
             _ => {}
         }
@@ -1616,6 +1659,192 @@ impl ChartItem {
         );
     }
 
+    /// A radar chart: one spoke per category clockwise from 12 o'clock, a polygon grid line at
+    /// each value step, the value labels up the first spoke (its axis line drawn last, in black),
+    /// category labels past the spoke ends, and per series a 15% fill under a 6pt outline; later
+    /// series are drawn first (measured: the first series' fill tints the second's outline).
+    fn draw_radar(&self, canvas: &Canvas) {
+        const FILL_ALPHA: f32 = 0.15;
+        const OUTLINE_WIDTH: f32 = 6.0;
+        const VALUE_LABEL_GAP: f32 = 7.5;
+        const CATEGORY_LABEL_GAP: f32 = 45.0;
+        let plot = self.plot();
+        let center = Point::new(
+            (plot.left + plot.right) / 2.0,
+            (plot.top + plot.bottom) / 2.0,
+        );
+        let radius = plot.height().min(plot.width()) / 2.0;
+        let scale = self.scale();
+        let count = self.categories.len().max(1);
+        // The unit vector of spoke `index` (sin, -cos: clockwise with y growing down).
+        let direction = |index: usize| {
+            let angle = std::f32::consts::TAU * index as f32 / count as f32;
+            Point::new(angle.sin(), -angle.cos())
+        };
+        let at = |index: usize, value: f64| {
+            center + direction(index) * (radius * (value / scale.top) as f32)
+        };
+        let polygon = |value_of: &dyn Fn(usize) -> f64| {
+            let points: Vec<Point> = (0..count).map(|index| at(index, value_of(index))).collect();
+            let mut path = polyline(&points);
+            path.close();
+            path
+        };
+        for value in scale.values().skip(1) {
+            canvas.draw_path(&polygon(&|_| value), &grid_paint());
+        }
+        for index in 0..count {
+            canvas.draw_line(center, at(index, scale.top), &grid_paint());
+        }
+        for series in (0..self.series.len()).rev() {
+            let color = self.series_color(series, 13);
+            let outline = polygon(&|index| self.value(series, index));
+            let mut fill = paint(color);
+            fill.set_alpha_f(FILL_ALPHA);
+            canvas.draw_path(&outline, &fill);
+            canvas.draw_path(&outline, &stroke_paint(color, OUTLINE_WIDTH));
+        }
+        let value_style = self.axis_style(true, 0);
+        let value_font = value_style.font();
+        for value in scale.values() {
+            let label = self.tick_label(value);
+            let label_x = center.x - VALUE_LABEL_GAP - shaper::measure(&label, &value_font);
+            let label_y = center.y - radius * (value / scale.top) as f32;
+            text::draw_line(
+                canvas,
+                &label,
+                Point::new(label_x, label_y + mid_baseline(value_style.size)),
+                &value_font,
+                &value_style,
+            );
+        }
+        let axis_x = center.x.floor() + 0.5;
+        canvas.draw_line(
+            (axis_x, center.y),
+            (axis_x, center.y - radius),
+            &axis_paint(),
+        );
+        // Each label hangs off a point 45pt past its spoke: starting there on the right, ending
+        // there on the left, centred at the top and bottom, its cap height centred on it (measured
+        // to 6pt on a five-spoke chart).
+        let style = self.axis_style(false, 0);
+        let font = style.font();
+        for (index, category) in self.categories.iter().enumerate() {
+            let width = shaper::measure(category, &font);
+            let direction = direction(index);
+            let anchor = center + direction * (radius + CATEGORY_LABEL_GAP);
+            let left = match direction.x {
+                x if x > 0.01 => anchor.x,
+                x if x < -0.01 => anchor.x - width,
+                _ => anchor.x - width / 2.0,
+            };
+            text::draw_line(
+                canvas,
+                category,
+                Point::new(left, anchor.y + mid_baseline(style.size)),
+                &font,
+                &style,
+            );
+        }
+    }
+
+    /// An interactive chart's first data set name, centred under the axis labels (measured:
+    /// "April").
+    fn draw_set_name(&self, canvas: &Canvas) {
+        let Some(name) = self.categories.first() else {
+            return;
+        };
+        let plot = self.plot();
+        let style = self.axis_style(false, 0);
+        let font = style.font();
+        let label_x = (plot.left + plot.right) / 2.0 - shaper::measure(name, &font) / 2.0;
+        text::draw_line(
+            canvas,
+            name,
+            Point::new(
+                label_x,
+                plot.bottom + below_baseline(style.size) + below_bottom(style.size),
+            ),
+            &font,
+            &style,
+        );
+    }
+
+    /// The Y series of a scatter or bubble chart: the first series holds every point's X value
+    /// (shared X values), each later one a Y series, followed on a bubble chart by its sizes.
+    fn y_series(&self) -> Vec<usize> {
+        let stride = if self.chart_type.is_bubble() { 2 } else { 1 };
+        (1..self.series.len()).step_by(stride).collect()
+    }
+
+    /// A scatter or bubble chart: value axes down the left and along the bottom, horizontal grid
+    /// lines only, and per point a 14pt dot (an interactive scatter: a 3pt ring) or a bubble whose
+    /// area follows its size, the largest 27% of the plot height across (measured: 205pt on a
+    /// 760pt plot). An interactive chart shows its first data set (point 0) on axes spanning all
+    /// sets.
+    fn draw_scatter(&self, canvas: &Canvas) {
+        const DOT_RADIUS: f32 = 7.0;
+        const RING_RADIUS: f32 = 5.5;
+        const RING_WIDTH: f32 = 3.0;
+        const BUBBLE_DIAMETER: f32 = 0.27;
+        let plot = self.plot();
+        let count = self.categories.len();
+        let y_series = self.y_series();
+        let x_scale = self.scale_of(&[0], 1);
+        let y_scale = self.scale_of(&y_series, 0);
+        let x_of = |value: f64| plot.left + (value / x_scale.top) as f32 * plot.width();
+        let y_of = |value: f64| plot.bottom - (value / y_scale.top) as f32 * plot.height();
+        self.draw_value_axis(canvas, y_scale, &y_of, &|value| self.tick_label(value));
+        let style = self.axis_style(false, 0);
+        let font = style.font();
+        for value in x_scale.values() {
+            let label = self.tick_label(value);
+            let label_x = x_of(value) - shaper::measure(&label, &font) / 2.0;
+            text::draw_line(
+                canvas,
+                &label,
+                Point::new(label_x, plot.bottom + below_baseline(style.size)),
+                &font,
+                &style,
+            );
+        }
+        let interactive = matches!(
+            self.chart_type,
+            ChartType::InteractiveScatter | ChartType::InteractiveBubble
+        );
+        let points = if interactive { count.min(1) } else { count };
+        let largest = y_series
+            .iter()
+            .flat_map(|&series| (0..count).map(move |point| self.value(series + 1, point)))
+            .fold(0.0, f64::max);
+        // Later series are drawn first, under earlier ones (measured: blue over green).
+        for (ordinal, &series) in y_series.iter().enumerate().rev() {
+            let color = self.series_color(ordinal, self.chart_type.fill_field());
+            for point in 0..points {
+                let center =
+                    Point::new(x_of(self.value(0, point)), y_of(self.value(series, point)));
+                if self.chart_type.is_bubble() {
+                    let size = self.value(series + 1, point);
+                    if size > 0.0 && largest > 0.0 {
+                        let radius =
+                            BUBBLE_DIAMETER * plot.height() / 2.0 * (size / largest).sqrt() as f32;
+                        canvas.draw_circle(center, radius, &paint(color));
+                    }
+                } else if interactive {
+                    canvas.draw_circle(center, RING_RADIUS, &stroke_paint(color, RING_WIDTH));
+                } else {
+                    canvas.draw_circle(center, DOT_RADIUS, &paint(color));
+                }
+            }
+        }
+        self.draw_baseline(canvas);
+        self.draw_value_axis_line(canvas, 0, plot.left);
+        // Measured: an interactive scatter names its data set, an interactive bubble does not.
+        if self.chart_type == ChartType::InteractiveScatter {
+            self.draw_set_name(canvas);
+        }
+    }
+
     /// An interactive chart exports its first data set: a column (type 20) or a horizontal bar
     /// (type 21) per series, labelled with the series names, and the set's name centred beneath
     /// (measured: "April"). The value axis spans every data set the slider can show.
@@ -1629,24 +1858,6 @@ impl ChartItem {
         let maximum = self.values.iter().flatten().copied().fold(0.0, f64::max);
         let scale = self.axis_scale(maximum, 0);
         let first_value = |series: usize| self.value(series, 0);
-        let set_name = |canvas: &Canvas| {
-            if let Some(name) = self.categories.first() {
-                let label_x =
-                    (plot.left + plot.right) / 2.0 - shaper::measure(name, &category_font) / 2.0;
-                text::draw_line(
-                    canvas,
-                    name,
-                    Point::new(
-                        label_x,
-                        plot.bottom
-                            + below_baseline(category_style.size)
-                            + below_bottom(category_style.size),
-                    ),
-                    &category_font,
-                    &category_style,
-                );
-            }
-        };
         if self.chart_type == ChartType::InteractiveBar {
             let x_of = |value: f64| plot.left + (value / scale.top) as f32 * plot.width();
             for value in scale.values().skip(1) {
@@ -1693,7 +1904,7 @@ impl ChartItem {
             }
             let axis_x = plot.left.floor() + 0.5;
             canvas.draw_line((axis_x, plot.top), (axis_x, plot.bottom), &axis_paint());
-            set_name(canvas);
+            self.draw_set_name(canvas);
             return;
         }
         let height_of = |value: f64| plot.bottom - (value / scale.top) as f32 * plot.height();
@@ -1723,7 +1934,7 @@ impl ChartItem {
             );
         }
         self.draw_baseline(canvas);
-        set_name(canvas);
+        self.draw_set_name(canvas);
     }
 
     // ---------------------------------------------------------------- pie
@@ -2012,10 +2223,14 @@ mod tests {
 
     #[test]
     fn nice_steps_match_numbers() {
-        assert_eq!(nice_step(457_485.0 / 4.0), 125_000.0);
-        assert_eq!(nice_step(131_280.0 / 4.0), 35_000.0);
-        assert_eq!(nice_step(82.0 / 4.0), 22.5);
-        assert_eq!(nice_step(3.22 / 4.0), 1.0);
+        assert_eq!(nice_step(457_485.0 / 4.0, 0.25), 125_000.0);
+        assert_eq!(nice_step(131_280.0 / 4.0, 0.25), 35_000.0);
+        assert_eq!(nice_step(82.0 / 4.0, 0.25), 22.5);
+        assert_eq!(nice_step(3.22 / 4.0, 0.25), 1.0);
+        // Scatter X axes (measured: maxima 15, 12 and 40 over four steps).
+        assert_eq!(nice_step(15.0 / 4.0, 1.0), 4.0);
+        assert_eq!(nice_step(12.0 / 4.0, 1.0), 3.0);
+        assert_eq!(nice_step(40.0 / 4.0, 1.0), 10.0);
     }
 
     #[test]
@@ -2044,5 +2259,18 @@ mod tests {
         assert_eq!(flat, two_d);
         assert!(ChartType::from_stored(10).is_combo() && ChartType::from_stored(11).is_combo());
         assert!(!ChartType::from_stored(1).is_combo());
+    }
+
+    #[test]
+    fn scatter_bubble_and_radar_types() {
+        let xy: Vec<bool> = [9, 22, 23, 24]
+            .into_iter()
+            .map(|stored| ChartType::from_stored(stored).is_xy())
+            .collect();
+        assert_eq!(xy, vec![true; 4]);
+        assert!(ChartType::from_stored(22).is_bubble() && ChartType::from_stored(24).is_bubble());
+        assert!(!ChartType::from_stored(9).is_bubble());
+        assert_eq!(ChartType::from_stored(27), ChartType::Radar);
+        assert!(!ChartType::Radar.is_xy());
     }
 }
