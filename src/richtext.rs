@@ -1360,7 +1360,16 @@ fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
             }
             let end = end.max(start + 1);
             let segment: String = characters[start..end].iter().collect();
-            let width = shaper::measure(&segment, &font);
+            // A word's trailing space kerns with the next word's first letter (Helvetica Bold
+            // " A": the next word starts 1.5pt earlier at 41pt), so that pair joins its width.
+            let width = match characters.get(end) {
+                Some(&next) if characters[end - 1] == ' ' && !matches!(next, '\n' | '\t') => {
+                    let next = next.to_string();
+                    shaper::measure(&format!("{segment}{next}"), &font)
+                        - shaper::measure(&next, &font)
+                }
+                _ => shaper::measure(&segment, &font),
+            };
             current.push(piece(segment, width));
             if break_char(&characters, end - 1) {
                 words.push(Some(std::mem::take(&mut current)));

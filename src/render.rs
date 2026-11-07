@@ -130,7 +130,7 @@ pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     // Per-document layout state (thread-local, so batch conversions reset it).
     ctx::LOCALE.with(|cell| *cell.borrow_mut() = locale);
     ctx::GROW_ROWS.set(extension != "numbers");
-    ctx::CENTRE_ZERO_SIZE.set(extension == "key");
+    ctx::KEYNOTE.set(extension == "key");
     ctx::PAGES_LAYOUT.set(extension == "pages");
     ctx::SLIDE_WIDTH.set(0.0);
     ctx::ABOVE_BELOW.with(|rects| rects.borrow_mut().clear());

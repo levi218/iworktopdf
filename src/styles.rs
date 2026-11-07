@@ -17,8 +17,9 @@ pub mod ctx {
     thread_local! {
         /// Pages (and Keynote) table rows grow to their content.
         pub static GROW_ROWS: Cell<bool> = const { Cell::new(false) };
-        /// A zero-size text box's natural frame is centred on its position (Keynote).
-        pub static CENTRE_ZERO_SIZE: Cell<bool> = const { Cell::new(false) };
+        /// The document is a Keynote presentation (a zero-size text box's natural frame is centred
+        /// on its position; an unset chart legend flag hides the legend).
+        pub static KEYNOTE: Cell<bool> = const { Cell::new(false) };
         /// Pages' text engine lays some lines out differently (see text.rs).
         pub static PAGES_LAYOUT: Cell<bool> = const { Cell::new(false) };
         /// The Keynote slide width, set per slide.

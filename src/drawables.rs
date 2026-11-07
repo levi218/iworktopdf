@@ -624,7 +624,7 @@ impl ShapeItem {
             let shrinks = styles
                 .text_frame_prop(style, 1)
                 .is_some_and(|props| props.boolean(1));
-            if ctx::CENTRE_ZERO_SIZE.get() && !shrinks {
+            if ctx::KEYNOTE.get() && !shrinks {
                 let insets = text_insets(styles, style);
                 let text = storage_text(styles, style, storage);
                 let needed = text.block_height(width - insets.left - insets.right)
@@ -776,11 +776,9 @@ impl ShapeItem {
     fn bounds(&self) -> Rect {
         let (left, top) = (self.origin.x, self.origin.y);
         // A zero-size text box in Numbers spans its path's natural frame from the position.
-        if let (false, true, Some((natural_width, natural_height))) = (
-            ctx::CENTRE_ZERO_SIZE.get(),
-            self.zero_size(),
-            self.natural_size(),
-        ) {
+        if let (false, true, Some((natural_width, natural_height))) =
+            (ctx::KEYNOTE.get(), self.zero_size(), self.natural_size())
+        {
             return Rect::new(
                 left - 1.0,
                 top - 1.0,
@@ -993,7 +991,7 @@ impl ShapeItem {
     /// the text plus padding when filled (measured: white highlight boxes behind centred slogans
     /// span each text line), else in its natural frame (measured: outlined code boxes stored 0 x 0).
     fn zero_size_frame(&self, fill: Option<&Proto>) -> Option<(Path, Rect)> {
-        if !ctx::CENTRE_ZERO_SIZE.get() || !self.zero_size() {
+        if !ctx::KEYNOTE.get() || !self.zero_size() {
             return None;
         }
         let layout = self.text_layout()?;
@@ -1173,10 +1171,7 @@ impl ShapeItem {
         }
         // Keynote (and Pages) do not export lines that overflow a sized text box.
         let height_valid = flags.has(3) && (flags.int(3) & 2) != 0;
-        if (ctx::CENTRE_ZERO_SIZE.get() || ctx::GROW_ROWS.get())
-            && height_valid
-            && rect.height() > 0.0
-        {
+        if (ctx::KEYNOTE.get() || ctx::GROW_ROWS.get()) && height_valid && rect.height() > 0.0 {
             text.clip_overflow = true;
         }
         Some(TextLayout {
@@ -1203,7 +1198,7 @@ impl ShapeItem {
                 HAlign::Right => natural_width - insets.right - text_width - natural_width,
                 _ => insets.left,
             };
-            let mut top = match (ctx::CENTRE_ZERO_SIZE.get(), vertical_align) {
+            let mut top = match (ctx::KEYNOTE.get(), vertical_align) {
                 (false, _) | (true, 0) => insets.top,
                 (true, 2) => -natural_height + insets.top,
                 _ => -natural_height / 2.0 + insets.top,
