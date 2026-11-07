@@ -8,16 +8,42 @@ use crate::drawables::{geometry, is_zero, union};
 use crate::formula::{self, ChartValue};
 use crate::iwa::{IwaObject, Proto};
 use crate::shaper::{self, TaggedFont};
-use crate::styles::{self, Styles};
+use crate::styles::{self, ctx, Styles};
 use crate::text::{self, HAlign, TextStyle};
 use skia_safe::{Canvas, Color, Paint, PaintCap, PaintJoin, PaintStyle, Path, Point, Rect};
 
-// Measured offsets of axis labels from the plot area.
-const VALUE_LABEL_GAP: f32 = 11.325;
-const CATEGORY_LABEL_GAP: f32 = 11.825;
-const BELOW_BASELINE: f32 = 13.91;
-const BELOW_BOTTOM: f32 = 16.04;
-const MID_BASELINE: f32 = 3.73;
+// Offsets of axis labels from the plot area, measured on 10pt labels and growing with the label
+// size (fitted on 10, 12 and 32pt labels in Numbers and Keynote, to 0.4pt).
+
+/// An offset measured on 10pt labels, grown by `per_point` for each point above 10.
+fn at_size(at_10pt: f32, per_point: f32, size: f32) -> f32 {
+    at_10pt + per_point * (size - 10.0)
+}
+
+/// Gap between a value label's right edge and the plot.
+fn value_label_gap(size: f32) -> f32 {
+    at_size(11.325, 0.605, size)
+}
+
+/// Gap between a horizontal chart's category label and the plot.
+fn category_label_gap(size: f32) -> f32 {
+    at_size(11.825, 0.605, size)
+}
+
+/// Baseline of the labels under the plot, below its bottom edge.
+fn below_baseline(size: f32) -> f32 {
+    at_size(13.91, 1.521, size)
+}
+
+/// Bottom of the labels under the plot (their baseline plus Helvetica Neue's descent).
+fn below_bottom(size: f32) -> f32 {
+    below_baseline(size) + 0.213 * size
+}
+
+/// Baseline offset of a label centred vertically on a point.
+fn mid_baseline(size: f32) -> f32 {
+    3.73 * size / 10.0
+}
 const LEGEND_BASELINE: f32 = 9.59;
 // Measured on a two-axis chart: a value title's baseline sits 8.5pt outside its labels (left) or
 // 15pt beyond their right edge (right), reading upward and centred on the plot; rotated category
@@ -559,12 +585,12 @@ impl ChartItem {
     }
 
     /// The legend frame, stored relative to the plot area's centre (hidden legends take no space:
-    /// chart non-style 20).
+    /// chart non-style 20; unset, Keynote hides the legend while Numbers and Pages show it).
     fn legend_frame(&self) -> Rect {
         let frame = self.chart.message(3);
         let hidden = self
             .style_property(self.chart.reference(10), 20)
-            .is_some_and(|props| !props.boolean_or(20, true));
+            .map_or_else(|| ctx::KEYNOTE.get(), |props| !props.boolean(20));
         if frame.is_empty() || hidden {
             return Rect::default();
         }
@@ -677,14 +703,46 @@ impl ChartItem {
         }
     }
 
+    /// The style field holding a series' colour: pies fill wedges (17); two-axis charts colour
+    /// their columns (16) and lines (51) separately (measured: a column and a line series sharing
+    /// one colour while their theme colours differ).
+    fn color_field(&self, series: usize) -> i32 {
+        match self.chart_type {
+            chart_type if chart_type.is_pie() => 17,
+            ChartType::TwoAxis if self.series_is_column(series) => 16,
+            ChartType::TwoAxis => 51,
+            chart_type => chart_type.fill_field(),
+        }
+    }
+
+    /// A series' style: its private style, else the theme's for its index (0 when none).
+    fn series_style(&self, series: usize) -> u64 {
+        if self.series_styles.is_empty() {
+            return 0;
+        }
+        let index = self.original(series);
+        match self.series_styles[index % self.series_styles.len()] {
+            0 => {
+                let theme = self.chart.references(17);
+                theme.get(index % theme.len().max(1)).copied().unwrap_or(0)
+            }
+            id => id,
+        }
+    }
+
+    /// A two-axis line series' stroke width (series style 51): `None` when its stroke is empty
+    /// (markers only), the default width when the style sets none.
+    fn line_width(&self, series: usize) -> Option<f32> {
+        match self.style_property(self.series_style(series), 51) {
+            Some(props) => styles::stroke_of(Some(&props.message(51)), false).map(|s| s.width),
+            None => Some(LINE_WIDTH),
+        }
+    }
+
     fn series_color(&self, series: usize, field: i32) -> Color {
         let index = self.original(series);
         if !self.series_styles.is_empty() {
-            let theme = self.chart.references(17);
-            let mut id = self.series_styles[index % self.series_styles.len()];
-            if id == 0 {
-                id = theme.get(index % theme.len().max(1)).copied().unwrap_or(0);
-            }
+            let id = self.series_style(series);
             // The type's fill field, else the default fill (14).
             for fill_field in [field, 14] {
                 if let Some(color) = self
@@ -734,7 +792,9 @@ impl ChartItem {
             let widest = if self.categories.is_empty() || !self.show_category_labels() {
                 0.0
             } else {
-                max_width(self.categories.iter(), &category_font) + CATEGORY_LABEL_GAP + 0.5
+                max_width(self.categories.iter(), &category_font)
+                    + category_label_gap(category_font.font.size())
+                    + 0.5
             };
             bounds = union(
                 bounds,
@@ -742,7 +802,7 @@ impl ChartItem {
                     plot.left - widest,
                     plot.top,
                     plot.left,
-                    plot.bottom + BELOW_BOTTOM,
+                    plot.bottom + below_bottom(value_font.font.size()),
                 ),
             );
             // The last value label is centred on the plot's right edge and overhangs it.
@@ -761,10 +821,10 @@ impl ChartItem {
         bounds = union(
             bounds,
             Rect::new(
-                plot.left - VALUE_LABEL_GAP - widest_tick - 0.5,
+                plot.left - value_label_gap(value_font.font.size()) - widest_tick - 0.5,
                 plot.top,
                 plot.right + 0.5,
-                plot.bottom + BELOW_BOTTOM,
+                plot.bottom + below_bottom(category_font.font.size()),
             ),
         );
         // Line and area charts put the categories on the plot edges: the last label is centred on
@@ -846,7 +906,7 @@ impl ChartItem {
                 bounds,
                 Rect::new(
                     plot.left
-                        - VALUE_LABEL_GAP
+                        - value_label_gap(value_font.font.size())
                         - widest
                         - TITLE_GAP_LEFT
                         - text::ascent(&title_style),
@@ -856,7 +916,7 @@ impl ChartItem {
                 ),
             );
         }
-        let mut bottom = plot.bottom + BELOW_BOTTOM;
+        let mut bottom = plot.bottom + below_bottom(category_font.font.size());
         if self.rotated_categories() && !self.categories.is_empty() {
             bottom = bottom.max(
                 plot.bottom + ROTATED_LABEL_TOP + max_width(self.categories.iter(), category_font),
@@ -927,13 +987,9 @@ impl ChartItem {
         let style = self.legend_style();
         let font = style.font();
         let entries = self.legend_entries();
-        let field = if self.chart_type.is_pie() {
-            17
-        } else {
-            self.chart_type.fill_field()
-        };
         const SWATCH: f32 = 10.0;
         const GAP: f32 = 6.0;
+        // The least space between entries before the legend wraps to one entry per line.
         const SPACING: f32 = 9.63;
         let widths: Vec<f32> = entries
             .iter()
@@ -950,7 +1006,7 @@ impl ChartItem {
             for (index, entry) in entries.iter().enumerate() {
                 let baseline = frame.top + 11.75 + index as f32 * pitch;
                 let swatch_x = frame.left + 12.0;
-                let fill = paint(self.series_color(index, field));
+                let fill = paint(self.series_color(index, self.color_field(index)));
                 if self.chart_type.is_pie() {
                     canvas.draw_circle(
                         (swatch_x + diameter / 2.0, baseline - 4.51),
@@ -978,12 +1034,24 @@ impl ChartItem {
             }
             return;
         }
-        let mut pen_x = frame.center_x() - total / 2.0;
+        // One row: the space left in the frame is shared equally before, between and after the
+        // entries (measured on 1-6 entry legends in Numbers and Pages, to 0.5pt).
+        let count = entries.len() as f32;
+        let gap = (frame.width() - (total - (count - 1.0) * SPACING)) / (count + 1.0);
+        let mut pen_x = frame.left + gap;
         for (index, entry) in entries.iter().enumerate() {
             let swatch_x = pen_x.floor();
-            let color = self.series_color(index, field);
+            let color = self.series_color(index, self.color_field(index));
             let top = frame.top + 1.0;
             match self.chart_type {
+                ChartType::TwoAxis if !self.series_is_column(index) => {
+                    draw_marker(
+                        canvas,
+                        (swatch_x + SWATCH / 2.0, top + SWATCH / 2.0).into(),
+                        color,
+                        self.line_width(index).unwrap_or(LINE_WIDTH),
+                    );
+                }
                 ChartType::Pie | ChartType::Donut => {
                     canvas.draw_circle(
                         (swatch_x + SWATCH / 2.0, top + SWATCH / 2.0),
@@ -1012,7 +1080,7 @@ impl ChartItem {
                 &font,
                 &style,
             );
-            pen_x += SWATCH + GAP + widths[index] + SPACING;
+            pen_x += SWATCH + GAP + widths[index] + gap;
         }
     }
 
@@ -1035,7 +1103,7 @@ impl ChartItem {
                         canvas,
                         category,
                         Point::new(
-                            category_x(index) - MID_BASELINE,
+                            category_x(index) - mid_baseline(style.size),
                             plot.bottom + ROTATED_LABEL_TOP,
                         ),
                         90.0,
@@ -1046,7 +1114,7 @@ impl ChartItem {
                     text::draw_line(
                         canvas,
                         category,
-                        Point::new(label_x, plot.bottom + BELOW_BASELINE),
+                        Point::new(label_x, plot.bottom + below_baseline(style.size)),
                         &font,
                         &style,
                     );
@@ -1056,7 +1124,7 @@ impl ChartItem {
         let labels_bottom = if rotated {
             plot.bottom + ROTATED_LABEL_TOP + max_width(self.categories.iter(), &font)
         } else {
-            plot.bottom + BELOW_BOTTOM
+            plot.bottom + below_bottom(style.size)
         };
         let title_style = self.title_style(false);
         if let Some(title) = self.category_title() {
@@ -1076,7 +1144,10 @@ impl ChartItem {
         let value_title_font = value_title_style.font();
         if let Some(title) = self.value_title(0) {
             let origin = Point::new(
-                plot.left - VALUE_LABEL_GAP - left_labels_width - TITLE_GAP_LEFT,
+                plot.left
+                    - value_label_gap(self.axis_style(true, 0).size)
+                    - left_labels_width
+                    - TITLE_GAP_LEFT,
                 middle + shaper::measure(&title, &value_title_font) / 2.0,
             );
             rotated_text(canvas, &title, origin, -90.0, &value_title_style);
@@ -1111,11 +1182,11 @@ impl ChartItem {
         }
         for value in scale.values() {
             let label = label_of(value);
-            let label_x = plot.left - VALUE_LABEL_GAP - shaper::measure(&label, &font);
+            let label_x = plot.left - value_label_gap(style.size) - shaper::measure(&label, &font);
             text::draw_line(
                 canvas,
                 &label,
-                Point::new(label_x, height_of(value) + MID_BASELINE),
+                Point::new(label_x, height_of(value) + mid_baseline(style.size)),
                 &font,
                 &style,
             );
@@ -1126,6 +1197,21 @@ impl ChartItem {
         let plot = self.plot();
         let axis_y = plot.bottom.floor() + 0.5;
         canvas.draw_line((plot.left, axis_y), (plot.right, axis_y), &axis_paint());
+    }
+
+    /// A value axis's line (its style's field 25) up the plot edge at `x`.
+    fn draw_value_axis_line(&self, canvas: &Canvas, axis: usize, x: f32) {
+        let shown = self
+            .chart
+            .references(13)
+            .get(axis)
+            .and_then(|&id| self.style_property(id, 25))
+            .is_some_and(|props| props.boolean(25));
+        if shown {
+            let plot = self.plot();
+            let axis_x = x.floor() + 0.5;
+            canvas.draw_line((axis_x, plot.top), (axis_x, plot.bottom), &axis_paint());
+        }
     }
 
     fn draw_xy(&self, canvas: &Canvas) {
@@ -1164,6 +1250,8 @@ impl ChartItem {
                 self.draw_columns(canvas, slot, &category_x, &height_of)
             }
             ChartType::Area | ChartType::StackedArea => {
+                // Areas cover the baseline (measured: only its end past the fill shows).
+                self.draw_baseline(canvas);
                 self.draw_areas(canvas, &category_x, &height_of)
             }
             ChartType::Line => {
@@ -1184,7 +1272,10 @@ impl ChartItem {
             }
             _ => {}
         }
-        self.draw_baseline(canvas);
+        if !matches!(self.chart_type, ChartType::Area | ChartType::StackedArea) {
+            self.draw_baseline(canvas);
+        }
+        self.draw_value_axis_line(canvas, 0, plot.left);
         let widest = self
             .scale()
             .values()
@@ -1208,6 +1299,8 @@ impl ChartItem {
         let bar_width = slot / (bars as f32 + (bars as f32 - 1.0) * bar_gap + set_gap);
         let group_width = bars as f32 * bar_width + (bars as f32 - 1.0) * bar_gap * bar_width;
         let bottom = self.plot().bottom;
+        let label_style = self.value_label_style(Color::WHITE);
+        let label_font = label_style.font();
         for category in 0..self.categories.len() {
             let mut base = 0.0;
             for series in 0..self.series.len() {
@@ -1232,6 +1325,20 @@ impl ChartItem {
                     ),
                     &paint(self.series_color(series, 13)),
                 );
+                if self.shows_values(series) {
+                    // Inside the column's end, centred (measured: 12pt bold, baseline 14.04pt
+                    // below the top).
+                    let label = cell_format::general(value);
+                    let label_x = left + (bar_width - shaper::measure(&label, &label_font)) / 2.0;
+                    let baseline = height_of(base + value) + 14.04 * label_style.size / 12.0;
+                    text::draw_line(
+                        canvas,
+                        &label,
+                        Point::new(label_x, baseline),
+                        &label_font,
+                        &label_style,
+                    );
+                }
                 if stacked {
                     base += value;
                 }
@@ -1298,7 +1405,10 @@ impl ChartItem {
             text::draw_line(
                 canvas,
                 &label,
-                Point::new(label_x, plot.bottom + BELOW_BASELINE - 0.5),
+                Point::new(
+                    label_x,
+                    plot.bottom + below_baseline(value_style.size) - 0.5,
+                ),
                 &value_font,
                 &value_style,
             );
@@ -1309,6 +1419,8 @@ impl ChartItem {
         let bar_gap = self.bar_gap();
         let bar_height = slot / (bars as f32 + (bars as f32 - 1.0) * bar_gap + self.set_gap());
         let group_height = bars as f32 * bar_height + (bars as f32 - 1.0) * bar_gap * bar_height;
+        let label_style = self.value_label_style(Color::WHITE);
+        let label_font = label_style.font();
         for (category, name) in self.categories.iter().enumerate() {
             let center_y = plot.top + (category as f32 + 0.5) * slot;
             let mut base = 0.0;
@@ -1326,17 +1438,31 @@ impl ChartItem {
                     (top + bar_height).floor(),
                 );
                 canvas.draw_rect(bar, &paint(self.series_color(series, 12)));
+                if self.shows_values(series) {
+                    // Inside the bar's end, right-aligned 2.5pt in (measured, 12pt bold).
+                    let label = cell_format::general(value);
+                    let label_x = x_of(base + value) - 2.5 - shaper::measure(&label, &label_font);
+                    let baseline = top + bar_height / 2.0 + 0.46 * label_style.size;
+                    text::draw_line(
+                        canvas,
+                        &label,
+                        Point::new(label_x, baseline),
+                        &label_font,
+                        &label_style,
+                    );
+                }
                 if stacked {
                     base += value;
                 }
             }
             if self.show_category_labels() {
-                let label_x =
-                    plot.left - CATEGORY_LABEL_GAP - shaper::measure(name, &category_font);
+                let label_x = plot.left
+                    - category_label_gap(category_style.size)
+                    - shaper::measure(name, &category_font);
                 text::draw_line(
                     canvas,
                     name,
-                    Point::new(label_x, center_y + MID_BASELINE),
+                    Point::new(label_x, center_y + mid_baseline(category_style.size)),
                     &category_font,
                     &category_style,
                 );
@@ -1409,7 +1535,7 @@ impl ChartItem {
                 label,
                 Point::new(
                     label_x,
-                    height_right(value) + MID_BASELINE * right_style.size / 10.0,
+                    height_right(value) + mid_baseline(right_style.size),
                 ),
                 &right_font,
                 &right_style,
@@ -1431,7 +1557,10 @@ impl ChartItem {
                     (left + bar_width).floor(),
                     plot.bottom.floor(),
                 );
-                canvas.draw_rect(bar, &paint(self.series_color(series, 13)));
+                canvas.draw_rect(
+                    bar,
+                    &paint(self.series_color(series, self.color_field(series))),
+                );
             }
         }
         for &series in &lines {
@@ -1443,14 +1572,20 @@ impl ChartItem {
                     )
                 })
                 .collect();
-            let line = line_paint(self.series_color(series, 13));
-            canvas.draw_path(&polyline(&points), &line);
+            let color = self.series_color(series, self.color_field(series));
+            let width = self.line_width(series);
+            if let Some(width) = width {
+                let mut line = line_paint(color);
+                line.set_stroke_width(width);
+                canvas.draw_path(&polyline(&points), &line);
+            }
             for point in points {
-                canvas.draw_circle(point, 3.5, &paint(Color::WHITE));
-                canvas.draw_circle(point, 3.5, &line);
+                draw_marker(canvas, point, color, width.unwrap_or(LINE_WIDTH));
             }
         }
         self.draw_baseline(canvas);
+        self.draw_value_axis_line(canvas, 0, plot.left);
+        self.draw_value_axis_line(canvas, 1, plot.right);
         let left_font = self.axis_style(true, 0).font();
         let widest_left = left_scale
             .values()
@@ -1483,7 +1618,12 @@ impl ChartItem {
                 text::draw_line(
                     canvas,
                     name,
-                    Point::new(label_x, plot.bottom + BELOW_BASELINE + BELOW_BOTTOM),
+                    Point::new(
+                        label_x,
+                        plot.bottom
+                            + below_baseline(category_style.size)
+                            + below_bottom(category_style.size),
+                    ),
                     &category_font,
                     &category_style,
                 );
@@ -1501,7 +1641,10 @@ impl ChartItem {
                 text::draw_line(
                     canvas,
                     &label,
-                    Point::new(label_x, plot.bottom + BELOW_BASELINE - 0.5),
+                    Point::new(
+                        label_x,
+                        plot.bottom + below_baseline(value_style.size) - 0.5,
+                    ),
                     &value_font,
                     &value_style,
                 );
@@ -1519,12 +1662,13 @@ impl ChartItem {
                     );
                     canvas.draw_rect(bar, &paint(self.series_color(series, 12)));
                 }
-                let label_x =
-                    plot.left - CATEGORY_LABEL_GAP - shaper::measure(name, &category_font);
+                let label_x = plot.left
+                    - category_label_gap(category_style.size)
+                    - shaper::measure(name, &category_font);
                 text::draw_line(
                     canvas,
                     name,
-                    Point::new(label_x, center_y + MID_BASELINE),
+                    Point::new(label_x, center_y + mid_baseline(category_style.size)),
                     &category_font,
                     &category_style,
                 );
@@ -1555,7 +1699,7 @@ impl ChartItem {
             text::draw_line(
                 canvas,
                 name,
-                Point::new(label_x, plot.bottom + BELOW_BASELINE),
+                Point::new(label_x, plot.bottom + below_baseline(category_style.size)),
                 &category_font,
                 &category_style,
             );
@@ -1591,6 +1735,29 @@ impl ChartItem {
         }
     }
 
+    /// The value label style: the series style's label paragraph (23) over 12pt text in `color`.
+    fn value_label_style(&self, color: Color) -> TextStyle {
+        let style = TextStyle {
+            size: 12.0,
+            color,
+            ..label_style()
+        };
+        match self
+            .series_styles
+            .first()
+            .and_then(|&id| self.style_int(id, 23))
+        {
+            Some(index) => self.chart_paragraph(Some(index), &style),
+            None => style,
+        }
+    }
+
+    /// Whether a series shows its values on its columns or bars (series non-style 39).
+    fn shows_values(&self, series: usize) -> bool {
+        self.series_property(series, 39)
+            .is_some_and(|props| props.boolean(39))
+    }
+
     fn draw_pie(&self, canvas: &Canvas) {
         let donut = self.chart_type == ChartType::Donut;
         let center = Point::new(self.frame.center_x(), self.frame.center_y());
@@ -1615,7 +1782,10 @@ impl ChartItem {
             radius /= 1.0 + largest;
         }
         let names = self.pie_names();
-        let mut labels: Vec<PieLabel> = Vec::new();
+        let style = self.value_label_style(if donut { Color::BLACK } else { Color::WHITE });
+        let font = style.font();
+        let cap_height = font.font.metrics().1.cap_height;
+        let mut labels: Vec<PieLabel> = Vec::with_capacity(values.len());
         let mut start = -90.0f32;
         for (index, &value) in values.iter().enumerate() {
             let sweep = (value / total * 360.0) as f32;
@@ -1663,10 +1833,25 @@ impl ChartItem {
             } else {
                 String::new()
             };
-            let label_radius = if donut { radius } else { radius * 0.672 };
+            // .NET's Math.Round: ties to even.
+            let percent = format!("{}%", (value / total * 100.0).round_ties_even());
+            let label_radius = if donut {
+                radius
+            } else {
+                // A label overflowing its wedge's arc (measured across the radius) moves out
+                // toward the rim (Keynote: a 25° wedge's 50pt label at 0.81, a 4° wedge's at 0.84).
+                // ponytail: two-point fit; a per-wedge fit test if more pies disagree.
+                let normal = radius * 0.668;
+                let across = shaper::measure(&percent, &font) * middle.sin().abs() as f32
+                    + cap_height * middle.cos().abs() as f32;
+                if across > 1.1 * normal * sweep.to_radians() {
+                    radius * 0.82
+                } else {
+                    normal
+                }
+            };
             labels.push(PieLabel {
-                // .NET's Math.Round: ties to even.
-                percent: format!("{}%", (value / total * 100.0).round_ties_even()),
+                percent,
                 name,
                 at: Point::new(
                     wedge_center.x + label_radius * middle.cos() as f32,
@@ -1676,28 +1861,15 @@ impl ChartItem {
             });
             start += sweep;
         }
-        let mut style = TextStyle {
-            size: 12.0,
-            color: if donut { Color::BLACK } else { Color::WHITE },
-            ..label_style()
-        };
-        if let Some(index) = self
-            .series_styles
-            .first()
-            .and_then(|&id| self.style_int(id, 23))
-        {
-            style = self.chart_paragraph(Some(index), &style);
-        }
         for label in labels {
             if donut {
                 self.draw_donut_label(canvas, &label, radius, &style);
             } else {
-                let font = style.font();
                 let x = label.at.x - shaper::measure(&label.percent, &font) / 2.0;
                 text::draw_line(
                     canvas,
                     &label.percent,
-                    Point::new(x, label.at.y + 4.3),
+                    Point::new(x, label.at.y + centering_baseline(&font)),
                     &font,
                     &style,
                 );
@@ -1731,6 +1903,7 @@ impl ChartItem {
             shaper::measure(&label.percent, &font),
             shaper::measure(&label.name, &font),
         );
+        let baseline = elbow.y + centering_baseline(&font);
         let text_x = |width: f32| {
             if right_side {
                 column_x + 7.0
@@ -1742,7 +1915,7 @@ impl ChartItem {
             text::draw_line(
                 canvas,
                 &label.percent,
-                Point::new(text_x(percent_width), elbow.y + 4.3),
+                Point::new(text_x(percent_width), baseline),
                 &font,
                 &style,
             );
@@ -1752,14 +1925,14 @@ impl ChartItem {
         text::draw_line(
             canvas,
             &label.name,
-            Point::new(text_x(name_width), elbow.y + 4.3 - half_line),
+            Point::new(text_x(name_width), baseline - half_line),
             &font,
             &style,
         );
         text::draw_line(
             canvas,
             &label.percent,
-            Point::new(text_x(percent_width), elbow.y + 4.3 + half_line),
+            Point::new(text_x(percent_width), baseline + half_line),
             &font,
             &style,
         );
@@ -1767,11 +1940,25 @@ impl ChartItem {
 }
 
 /// A pie wedge's label.
+/// The baseline offset that centres a line of `font` vertically on a point: half of
+/// ascent - descent (4.3pt for 12pt Helvetica Neue, 18.5pt at 50pt).
+fn centering_baseline(font: &TaggedFont) -> f32 {
+    // Skia reports the ascent as a negative distance above the baseline.
+    let (_, metrics) = font.font.metrics();
+    (-metrics.ascent - metrics.descent) / 2.0
+}
+
 struct PieLabel {
     percent: String,
     name: String,
     at: Point,
     center: Point,
+}
+
+/// A line series' data point: a white circle ringed in the series colour at the line's width.
+fn draw_marker(canvas: &Canvas, center: Point, color: Color, width: f32) {
+    canvas.draw_circle(center, 3.5, &paint(Color::WHITE));
+    canvas.draw_circle(center, 3.5, &stroke_paint(color, width));
 }
 
 fn polyline(points: &[Point]) -> Path {

@@ -214,24 +214,38 @@ fn batch(arguments: &Arguments) -> Result<i32> {
         .collect();
     eprintln!("{} documents, {} selected", documents.len(), selected.len());
     let bar = progress(selected.len(), "converting");
-    // Each document converts on one thread (layout state is thread-local); documents run in
-    // parallel. A panic in one document is reported and does not stop the others.
-    let failures: Vec<String> = selected
+    // Each document converts in its own child process (`convert -o`): PDFium is locked per
+    // process, so in-process threads would queue on it, and a crash (abort, segfault) in one
+    // document only fails that document. Rayon keeps one child running per core.
+    let executable = std::env::current_exe()?;
+    let failures: Vec<&String> = selected
         .par_iter()
-        .filter_map(|name| {
+        .filter(|name| {
             let target = output.join(format!("{name}.pdf"));
-            let converted = std::panic::catch_unwind(|| -> Result<usize> {
-                std::fs::create_dir_all(target.parent().unwrap_or(&output))?;
-                Ok(render::convert(&source.join(name), &target)?)
-            });
+            let mut command = Command::new(&executable);
+            command
+                .arg("convert")
+                .arg(source.join(name))
+                .arg("-o")
+                .arg(&target)
+                .stdout(Stdio::null());
+            if let Some(dir) = arguments.option("fonts") {
+                command.args(["--fonts", dir]);
+            }
+            let status = std::fs::create_dir_all(target.parent().unwrap_or(&output))
+                .and_then(|()| command.output());
             bar.inc(1);
-            let error = match converted {
-                Ok(Ok(_)) => return None,
-                Ok(Err(error)) => error.to_string(),
-                Err(_) => "panicked".to_owned(),
+            // `output()` captures stderr so the child's "wrote ..." line does not break the bar.
+            let error = match status {
+                Ok(finished) if finished.status.success() => return false,
+                Ok(finished) => match finished.status.code() {
+                    Some(_) => String::from_utf8_lossy(&finished.stderr).trim().to_owned(),
+                    None => format!("crashed ({})", finished.status),
+                },
+                Err(error) => error.to_string(),
             };
             bar.suspend(|| log::error!("{name}: {error}"));
-            Some(name.clone())
+            true
         })
         .collect();
     bar.finish_and_clear();

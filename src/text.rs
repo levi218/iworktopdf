@@ -464,9 +464,18 @@ pub fn variant(postscript_name: &str, bold: bool, italic: bool) -> String {
         (true, false) => &["-Bold"],
         _ => &["-Italic", "-Oblique"],
     };
+    // A styled weight joins the style to it ("Helvetica-Light" → "Helvetica-LightOblique"); a
+    // family name takes it after a dash ("Helvetica" → "Helvetica-Oblique").
+    let joined = |base: &str, tail: &str| {
+        if base.contains('-') {
+            format!("{base}{}", &tail[1..])
+        } else {
+            format!("{base}{tail}")
+        }
+    };
     [postscript_name, stem]
         .iter()
-        .flat_map(|base| tails.iter().map(move |tail| format!("{base}{tail}")))
+        .flat_map(|base| tails.iter().map(move |tail| joined(base, tail)))
         .find(|candidate| known(candidate))
         .unwrap_or_else(|| postscript_name.to_owned())
 }
@@ -893,6 +902,13 @@ mod tests {
     #[test]
     fn variant_picks_known_faces() {
         assert_eq!(variant("Helvetica-Bold", true, false), "Helvetica-Bold");
+        assert_eq!(variant("Helvetica", false, true), "Helvetica-Oblique");
+        if fonts::is_exact("Helvetica-LightOblique") {
+            assert_eq!(
+                variant("Helvetica-Light", false, true),
+                "Helvetica-LightOblique"
+            );
+        }
         assert_eq!(variant("NoSuchFace", true, false), "NoSuchFace");
     }
 

@@ -3,11 +3,13 @@
 
 use pdfium_render::prelude::*;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-/// One process-wide binding: PDFium is not thread-safe, so pdfium-render's `sync` feature
-/// serialises every call behind its own lock.
-static PDFIUM: OnceLock<Option<Pdfium>> = OnceLock::new();
+/// One process-wide binding behind a lock. pdfium-render's `sync` feature only serialises single
+/// calls, but PDFium's shared objects (colour spaces, fonts) use non-atomic reference counts, so
+/// two threads each loading a document still corrupt memory. Holding the lock for a whole
+/// load-render-drop session prevents that.
+static PDFIUM: OnceLock<Option<Mutex<Pdfium>>> = OnceLock::new();
 
 /// Library search: IWORK2PDF_PDFIUM (a file), next to the executable, the working directory,
 /// then the system library path.
@@ -33,9 +35,18 @@ fn bind() -> Option<Pdfium> {
     Pdfium::bind_to_system_library().ok().map(Pdfium::new)
 }
 
-/// The thread's PDFium binding, or `None` when the library is not found.
-pub fn get() -> Option<&'static Pdfium> {
-    PDFIUM.get_or_init(bind).as_ref()
+/// Exclusive access to the PDFium binding, or `None` when the library is not found.
+///
+/// Documents loaded through the guard borrow it, so the compiler guarantees they are dropped
+/// before the lock is released (Rust's borrow checker plays the role of a `with` block here).
+///
+/// # Returns
+///
+/// A lock guard that dereferences to `Pdfium`; other threads wait until it is dropped.
+pub fn get() -> Option<MutexGuard<'static, Pdfium>> {
+    let binding = PDFIUM.get_or_init(|| bind().map(Mutex::new)).as_ref()?;
+    // A panic while rendering leaves the lock "poisoned"; PDFium itself is still usable.
+    Some(binding.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Renders a page at `dpi` onto `background` (None: transparent). RGBA, unpremultiplied.
