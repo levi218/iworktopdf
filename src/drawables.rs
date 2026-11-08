@@ -659,6 +659,17 @@ impl ShapeItem {
         }
     }
 
+    /// Moves the shape up so that it ends at or above `bottom` (Keynote keeps a slide-number
+    /// placeholder on the slide: measured, a 57.5pt box stored 26.5pt past the bottom edge draws
+    /// flush with it).
+    ///
+    /// # Arguments
+    ///
+    /// * `bottom` - The lowest y the shape may reach
+    pub fn keep_above(&mut self, bottom: f32) {
+        self.origin.y = self.origin.y.min(bottom - self.height);
+    }
+
     /// Re-routes a connection line between the current frames of the shapes it joins
     /// (TSD.ConnectionLineArchive connected_from 2 / connected_to 3). Apple ignores the stored
     /// path's endpoints: the curve runs centre to centre, its mid-curve point keeps the stored

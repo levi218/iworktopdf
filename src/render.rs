@@ -278,7 +278,9 @@ fn render_keynote(styles: &Styles, pdf: &mut PdfPages) -> Result<()> {
     let size = show.message(4);
     let (width, height) = (size.float_or(1, 1024.0), size.float_or(2, 768.0));
     let mut preview = PreviewBackground::default();
-    for (index, slide_id) in slide_order(doc, &show).into_iter().enumerate() {
+    let slides = slide_order(doc, &show);
+    ctx::PAGE_COUNT.set(slides.len() as i32);
+    for (index, slide_id) in slides.into_iter().enumerate() {
         let Some(slide) = doc.body(slide_id) else {
             continue;
         };
@@ -302,6 +304,8 @@ fn render_keynote(styles: &Styles, pdf: &mut PdfPages) -> Result<()> {
         canvas.clip_rect(Rect::from_wh(width, height), None, None);
         ctx::SLIDE_WIDTH.set(width);
         let slide_number = index + 1;
+        // Slide-number placeholders hold a page-number field (TSWP.NumberAttachmentArchive).
+        ctx::PAGE_NUMBER.set(slide_number as i32);
         draw_slide(
             styles,
             canvas,
@@ -424,7 +428,7 @@ fn draw_slide(
         (slide.reference(5), visible(4, true)),
         (slide.reference(6), visible(5, true)),
         (slide.reference(30), visible(7, false)),
-        (slide.reference(20), visible(6, false)),
+        (slide.reference(20), visible(6, true)),
     ]);
     for id in z_order(slide) {
         let Some(object) = doc.get(id) else { continue };
@@ -433,7 +437,13 @@ fn draw_slide(
         }
         if object.typ == PLACEHOLDER {
             // KN.PlaceholderArchive wraps a TSWP.ShapeInfoArchive.
-            draw_object(styles, canvas, &object.with(2011, object.body.message(1)));
+            let shape_info = object.with(2011, object.body.message(1));
+            if let Some(mut item) = drawables::create(styles, &shape_info) {
+                if let (Item::Shape(shape), true) = (&mut item, id == slide.reference(20)) {
+                    shape.keep_above(height);
+                }
+                item.draw(canvas);
+            }
         } else {
             draw_object(styles, canvas, object);
         }
