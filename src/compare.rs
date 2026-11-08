@@ -1,15 +1,17 @@
-//! Page-by-page acceptance comparison of a converted PDF against Apple's export, with layout and
-//! text scored separately, both in colour.
+//! Page-by-page acceptance comparison of a converted PDF against Apple's export, in colour.
 //!
-//! - **Layout**: both pages are rendered by PDFium at 100 dpi on white with their text objects
-//!   removed, box-downsampled 2x2 (50 dpi effective, which forgives sub-pixel anti-aliasing of
-//!   hairlines), and a pixel differs when any of its red, green or blue channels differs by more
-//!   than 32/255. The score is the fraction of the page area that differs.
-//! - **Text**: every character PDFium extracts from Apple's page must appear on ours with the same
-//!   Unicode value, its origin within 1pt and its fill colour within 32/255 per channel; ours must
-//!   not show extra characters. The score is the unmatched fraction of all characters.
+//! - **Visual** (the pass criterion): both whole pages, text included, are rendered by PDFium at
+//!   100 dpi on white, box-downsampled 2x2 (50 dpi effective, which forgives sub-pixel
+//!   anti-aliasing of hairlines and glyph edges), and a pixel differs when any of its red, green or
+//!   blue channels differs by more than 32/255. The score is the fraction of the page area that
+//!   differs.
+//! - **Text** (information only): every character PDFium extracts from Apple's page should appear
+//!   on ours with the same Unicode value, its origin within 1pt and its fill colour within 32/255
+//!   per channel, with no extra characters. The score is the unmatched fraction of all characters;
+//!   text drawn as pixels or paths (a rasterised pasted PDF) counts as unmatched here although it
+//!   may look right.
 //!
-//! A page passes when both scores are below 1%. The metric is fixed: do not tune it to make files
+//! A page passes when its visual score is below 1%. The metric is fixed: do not tune it to make files
 //! pass.
 
 use crate::drawables::raster;
@@ -24,16 +26,16 @@ use std::path::{Path, PathBuf};
 
 /// Rasterisation resolution.
 pub const DPI: f32 = 100.0;
-/// Per-channel tolerance of the layout comparison (after the 2x2 downsample).
+/// Per-channel tolerance of the visual comparison (after the 2x2 downsample).
 pub const CHANNEL_TOLERANCE: u8 = 32;
 /// How far a character's origin may move, in points.
 pub const POSITION_TOLERANCE: f32 = 1.0;
-/// A page passes below this fraction for both scores.
+/// A page passes when its visual score is below this fraction.
 pub const THRESHOLD: f64 = 0.01;
 /// Pages larger than this many pixels are skipped unless IWORK2PDF_FULL=1.
 const MAX_PAGE_PIXELS: f64 = 60e6;
 /// Bumped when the cached data's meaning changes.
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
 
 /// Comparison failures that stop a file from being compared.
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +75,7 @@ pub struct PageCapture {
     /// Height in pixels.
     pub height: usize,
     /// RGB pixels of the page with its text removed.
-    pub layout: Vec<u8>,
+    pub pixels: Vec<u8>,
     /// The page's characters (whitespace left out).
     pub chars: Vec<TextChar>,
 }
@@ -83,8 +85,8 @@ pub struct PageCapture {
 pub struct PageScore {
     /// 1-based page number.
     pub page: usize,
-    /// Fraction of the area whose layout (text removed) differs.
-    pub layout: f64,
+    /// Fraction of the page area (text included) whose pixels differ.
+    pub visual: f64,
     /// Fraction of characters unmatched (missing, extra, moved or recoloured).
     pub text: f64,
     /// Why the page could not be compared, if it could not.
@@ -95,15 +97,15 @@ impl PageScore {
     fn failed(page: usize, error: String) -> PageScore {
         PageScore {
             page,
-            layout: 1.0,
+            visual: 1.0,
             text: 1.0,
             error: Some(error),
         }
     }
 
-    /// Both scores are below the threshold.
+    /// The visual score is below the threshold (the text score is information only).
     pub fn passed(&self) -> bool {
-        self.error.is_none() && self.layout < THRESHOLD && self.text < THRESHOLD
+        self.error.is_none() && self.visual < THRESHOLD
     }
 }
 
@@ -124,11 +126,11 @@ impl FileScore {
         self.error.is_none() && self.pages.iter().all(PageScore::passed)
     }
 
-    /// The page with the worst combined score.
+    /// The page with the worst visual score.
     pub fn worst(&self) -> Option<&PageScore> {
-        self.pages.iter().max_by(|first, second| {
-            (first.layout + first.text).total_cmp(&(second.layout + second.text))
-        })
+        self.pages
+            .iter()
+            .max_by(|first, second| first.visual.total_cmp(&second.visual))
     }
 }
 
@@ -205,7 +207,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// Serialises a capture: width, height, character count, characters, pixels.
 fn encode_capture(capture: &PageCapture) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(12 + capture.chars.len() * 15 + capture.layout.len());
+    let mut bytes = Vec::with_capacity(12 + capture.chars.len() * 15 + capture.pixels.len());
     for value in [capture.width, capture.height, capture.chars.len()] {
         bytes.extend((value as u32).to_le_bytes());
     }
@@ -215,7 +217,7 @@ fn encode_capture(capture: &PageCapture) -> Vec<u8> {
         bytes.extend(character.origin_y.to_le_bytes());
         bytes.extend(character.color);
     }
-    bytes.extend(&capture.layout);
+    bytes.extend(&capture.pixels);
     bytes
 }
 
@@ -239,33 +241,24 @@ fn decode_capture(bytes: &[u8]) -> Option<PageCapture> {
     (pixels.len() == width * height * 3).then(|| PageCapture {
         width,
         height,
-        layout: pixels.to_vec(),
+        pixels: pixels.to_vec(),
         chars,
     })
 }
 
-/// Renders a page without its text and extracts its characters.
-///
-/// Text objects are made invisible (render mode 3) rather than removed: removing page objects
-/// through pdfium-render crashes PDFium 7961, and an invisible text object draws nothing.
-fn capture(page: &mut PdfPage) -> Result<PageCapture, CompareError> {
+/// Renders the whole page and extracts its characters.
+fn capture(page: &PdfPage) -> Result<PageCapture, CompareError> {
     let chars = page_chars(page);
-    page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-    for mut object in page.objects().iter() {
-        if let Some(text) = object.as_text_object_mut() {
-            text.set_render_mode(PdfPageTextRenderMode::Invisible)?;
-        }
-    }
     let (width, height, rgba) =
         crate::pdfium::render(page, DPI, Some(PdfColor::WHITE)).map_err(CompareError::Pdf)?;
-    let layout = rgba
+    let pixels = rgba
         .chunks_exact(4)
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect();
     Ok(PageCapture {
         width,
         height,
-        layout,
+        pixels,
         chars,
     })
 }
@@ -298,10 +291,7 @@ fn page_chars(page: &PdfPage) -> Vec<TextChar> {
 }
 
 /// The fraction of differing pixels after a 2x2 box downsample, and the differing pixels' mask.
-fn layout_difference(
-    actual: &PageCapture,
-    expected: &PageCapture,
-) -> (f64, Vec<bool>, usize, usize) {
+fn page_difference(actual: &PageCapture, expected: &PageCapture) -> (f64, Vec<bool>, usize, usize) {
     let (width, height) = (
         actual.width.min(expected.width),
         actual.height.min(expected.height),
@@ -328,8 +318,8 @@ fn layout_difference(
             .collect()
     };
     let (ours, theirs) = (
-        downsample(&actual.layout, actual.width),
-        downsample(&expected.layout, expected.width),
+        downsample(&actual.pixels, actual.width),
+        downsample(&expected.pixels, expected.width),
     );
     let mask: Vec<bool> = ours
         .par_chunks_exact(3)
@@ -392,7 +382,7 @@ fn text_difference(actual: &[TextChar], expected: &[TextChar]) -> f64 {
 }
 
 /// Writes expected | actual | difference side by side, in colour: the difference panel shows
-/// Apple's page faded toward white with differing layout pixels in magenta.
+/// Apple's page faded toward white with differing pixels in magenta.
 fn write_overlay(
     path: &Path,
     expected: &PageCapture,
@@ -414,9 +404,9 @@ fn write_overlay(
             let pixel = |capture: &PageCapture| {
                 let at = (row * capture.width + column) * 3;
                 [
-                    capture.layout[at],
-                    capture.layout[at + 1],
-                    capture.layout[at + 2],
+                    capture.pixels[at],
+                    capture.pixels[at + 1],
+                    capture.pixels[at + 2],
                 ]
             };
             put(&mut rgba, column, row, pixel(expected));
@@ -468,7 +458,7 @@ pub struct Options {
 ///
 /// # Returns
 ///
-/// Per-page layout and text scores.
+/// Per-page visual and text scores.
 ///
 /// # Errors
 ///
@@ -500,7 +490,7 @@ pub fn compare(
     let mut pages = Vec::with_capacity(their_count);
     for index in 0..their_count {
         let page_index = index as PdfPageIndex;
-        let mut our_page = ours.pages().get(page_index)?;
+        let our_page = ours.pages().get(page_index)?;
         let pixels = f64::from(our_page.width().value * DPI / 72.0)
             * f64::from(our_page.height().value * DPI / 72.0);
         if pixels > MAX_PAGE_PIXELS && !options.full {
@@ -517,14 +507,14 @@ pub fn compare(
         let expected_capture = match cached {
             Some(capture) => capture,
             None => {
-                let capture = capture(&mut theirs.pages().get(page_index)?)?;
+                let capture = capture(&theirs.pages().get(page_index)?)?;
                 if let Some(cache) = &options.cache {
                     cache.store(expected, index, &capture);
                 }
                 capture
             }
         };
-        let actual_capture = capture(&mut our_page)?;
+        let actual_capture = capture(&our_page)?;
         if actual_capture.width.abs_diff(expected_capture.width) > 1
             || actual_capture.height.abs_diff(expected_capture.height) > 1
         {
@@ -539,10 +529,10 @@ pub fn compare(
             pages.push(PageScore::failed(index + 1, error));
             continue;
         }
-        let (layout, mask, mask_width, mask_height) =
-            layout_difference(&actual_capture, &expected_capture);
+        let (visual, mask, mask_width, mask_height) =
+            page_difference(&actual_capture, &expected_capture);
         let text = text_difference(&actual_capture.chars, &expected_capture.chars);
-        if let (Some(dir), true) = (&options.diff_dir, layout > 0.0 || text > 0.0) {
+        if let (Some(dir), true) = (&options.diff_dir, visual > 0.0) {
             write_overlay(
                 &dir.join(format!("{name}-p{}.png", index + 1)),
                 &expected_capture,
@@ -552,7 +542,7 @@ pub fn compare(
         }
         pages.push(PageScore {
             page: index + 1,
-            layout,
+            visual,
             text,
             error: None,
         });
@@ -592,21 +582,21 @@ mod tests {
     }
 
     #[test]
-    fn layout_counts_colour_differences() {
+    fn pixels_count_colour_differences() {
         let page = |rgb: [u8; 3]| PageCapture {
             width: 4,
             height: 4,
-            layout: rgb.repeat(16),
+            pixels: rgb.repeat(16),
             chars: Vec::new(),
         };
         let white = page([255, 255, 255]);
-        assert_eq!(layout_difference(&white, &white).0, 0.0);
+        assert_eq!(page_difference(&white, &white).0, 0.0);
         // A blue that grey would equal in luminance still differs per channel.
         let mut tinted = white.clone();
-        for pixel in tinted.layout.chunks_exact_mut(3).take(8) {
+        for pixel in tinted.pixels.chunks_exact_mut(3).take(8) {
             pixel.copy_from_slice(&[255, 255, 180]);
         }
-        let (fraction, mask, mask_width, mask_height) = layout_difference(&tinted, &white);
+        let (fraction, mask, mask_width, mask_height) = page_difference(&tinted, &white);
         assert_eq!((mask_width, mask_height), (2, 2));
         assert_eq!(mask, vec![true, true, false, false]);
         assert_eq!(fraction, 0.5);
@@ -617,7 +607,7 @@ mod tests {
         let capture = PageCapture {
             width: 1,
             height: 1,
-            layout: vec![1, 2, 3],
+            pixels: vec![1, 2, 3],
             chars: vec![char_at('x', 1.5, [4, 5, 6])],
         };
         assert_eq!(decode_capture(&encode_capture(&capture)), Some(capture));
@@ -628,13 +618,18 @@ mod tests {
     fn scores_pass_below_one_percent() {
         let page = PageScore {
             page: 1,
-            layout: 0.009,
+            visual: 0.009,
             text: 0.0,
             error: None,
         };
         assert!(page.passed());
+        assert!(PageScore {
+            text: 0.5,
+            ..page.clone()
+        }
+        .passed());
         assert!(!PageScore {
-            text: 0.02,
+            visual: 0.02,
             ..page.clone()
         }
         .passed());

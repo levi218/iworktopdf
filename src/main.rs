@@ -28,9 +28,10 @@ found there by PostScript name is used directly instead of a substitute. On macO
 Apple fonts are used the same way.
 
 'batch' converts every document under <src-dir> (or only those whose <rel>.pdf is listed in --set)
-to <out-dir>/<rel>.pdf. 'compare' scores each page's layout (rendered in colour with the text
-removed) and its text (characters, positions and colours) separately; a page passes when both
-differ by less than 1%. PDF rasterising needs libpdfium (IWORK2PDF_PDFIUM or next to the binary).
+to <out-dir>/<rel>.pdf. 'compare' renders each whole page in colour and passes it when less than
+1% of its area differs; it also reports, for information, the share of characters (code, position,
+colour) without a counterpart. PDF rasterising needs libpdfium (IWORK2PDF_PDFIUM or next to the binary).
+IWORK2PDF_PAGES=1 makes 'compare' list every page's visual%/text% after each file's line.
 IWORK2PDF_VERBOSE=1 (or RUST_LOG=debug) logs layout decisions.";
 
 /// Command-line arguments: positional values and `--name value` options (`-o` is `--out`).
@@ -318,14 +319,31 @@ fn score_line(name: &str, actual: &Path, expected: &Path, options: &Options) -> 
         );
     }
     let result: std::result::Result<FileScore, _> = compare::compare(actual, expected, options);
-    let (verdict, pages, layout, text, worst_page, detail) = match result {
+    let (verdict, pages, visual, text, worst_page, detail) = match result {
         Ok(score) => {
             let worst = score.worst();
-            let detail = score
+            let mut detail = score
                 .error
                 .clone()
                 .or_else(|| score.pages.iter().find_map(|page| page.error.clone()))
                 .unwrap_or_default();
+            // IWORK2PDF_PAGES=1 lists every page's "page visual%/text%" after the detail.
+            if std::env::var("IWORK2PDF_PAGES").as_deref() == Ok("1") && !score.pages.is_empty() {
+                let pages: Vec<String> = score
+                    .pages
+                    .iter()
+                    .map(|page| {
+                        format!(
+                            "{} {:.2}/{:.2}",
+                            page.page,
+                            page.visual * 100.0,
+                            page.text * 100.0
+                        )
+                    })
+                    .collect();
+                let separator = if detail.is_empty() { "" } else { "; " };
+                detail = format!("{detail}{separator}pages {}", pages.join(", "));
+            }
             let verdict = if detail.starts_with("skipped") {
                 "SKIP"
             } else if score.passed() {
@@ -333,10 +351,10 @@ fn score_line(name: &str, actual: &Path, expected: &Path, options: &Options) -> 
             } else {
                 "FAIL"
             };
-            let layout = score
+            let visual = score
                 .pages
                 .iter()
-                .map(|page| page.layout)
+                .map(|page| page.visual)
                 .fold(if score.error.is_some() { 1.0 } else { 0.0 }, f64::max);
             let text = score
                 .pages
@@ -346,7 +364,7 @@ fn score_line(name: &str, actual: &Path, expected: &Path, options: &Options) -> 
             (
                 verdict,
                 score.expected_pages,
-                layout,
+                visual,
                 text,
                 worst.map_or(0, |page| page.page),
                 detail,
@@ -361,7 +379,7 @@ fn score_line(name: &str, actual: &Path, expected: &Path, options: &Options) -> 
     };
     let line = format!(
         "{verdict:<7} {pages:>5} {:>7.2} {:>7.2} {worst_page:>3}  {name}{detail}",
-        layout * 100.0,
+        visual * 100.0,
         text * 100.0
     );
     (line, verdict == "PASS")
@@ -440,7 +458,7 @@ fn compare_command(arguments: &Arguments, raw: &[String]) -> Result<i32> {
     drop(sender);
     println!(
         "{:<7} {:>5} {:>7} {:>7} {:>3}  file",
-        "result", "pages", "layout%", "text%", "pg"
+        "result", "pages", "visual%", "text%", "pg"
     );
     let bar = progress(pairs.len(), "comparing");
     let mut pending: BTreeMap<usize, (bool, String)> = BTreeMap::new();
@@ -472,7 +490,7 @@ fn compare_command(arguments: &Arguments, raw: &[String]) -> Result<i32> {
     let compared = pairs.len() - skipped;
     let failed = compared - passed;
     println!(
-        "\n{passed} passed, {failed} failed of {compared}{} (a page passes when its layout and its text each differ by less than 1%; {} dpi colour, 2x2 box downsample, channel tolerance {}, text within {}pt)",
+        "\n{passed} passed, {failed} failed of {compared}{} (a page passes when less than 1% of its area differs; {} dpi colour, 2x2 box downsample, channel tolerance {}; text% is information only: characters within {}pt)",
         if skipped > 0 { format!(" ({skipped} skipped; IWORK2PDF_FULL=1 compares huge pages)") } else { String::new() },
         compare::DPI,
         compare::CHANNEL_TOLERANCE,

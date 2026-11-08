@@ -431,22 +431,26 @@ pub struct IwaDocument {
 /// nested Index.zip.
 fn read_zip(bytes: &[u8], package: bool, files: &mut Files) -> Result<()> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let names: Vec<String> = archive
-        .file_names()
+    // `by_index_raw` reads only the entry header (no decompression).
+    let names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index_raw(index).map(|entry| entry_name(&entry)))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let file_names: Vec<String> = names
+        .iter()
         .filter(|name| !name.ends_with('/'))
-        .map(str::to_owned)
+        .cloned()
         .collect();
-    let prefix = if package { package_prefix(&names) } else { "" };
-    for index in 0..archive.len() {
+    let prefix = if package {
+        package_prefix(&file_names).to_owned()
+    } else {
+        String::new()
+    };
+    for (index, name) in names.iter().enumerate() {
         let mut entry = archive.by_index(index)?;
         if entry.is_dir() {
             continue;
         }
-        let relative = entry
-            .name()
-            .get(prefix.len()..)
-            .unwrap_or_default()
-            .to_owned();
+        let relative = name.get(prefix.len()..).unwrap_or_default().to_owned();
         let mut contents = Vec::with_capacity(entry.size() as usize);
         entry
             .read_to_end(&mut contents)
@@ -458,6 +462,13 @@ fn read_zip(bytes: &[u8], package: bool, files: &mut Files) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// An entry's name. iWork writes UTF-8 names without the zip UTF-8 flag (e.g. the U+202F in
+/// macOS screenshot names), which the `zip` crate would decode as CP437; raw bytes that are valid
+/// UTF-8 are taken as UTF-8, anything else keeps the crate's decoding.
+fn entry_name<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> String {
+    std::str::from_utf8(entry.name_raw()).map_or_else(|_| entry.name().to_owned(), str::to_owned)
 }
 
 /// The folder prefix shared by every entry of a zipped package folder, if it holds an index.
@@ -716,6 +727,36 @@ mod tests {
         let without_index = vec!["X.key/a.txt".to_string(), "X.key/b.txt".to_string()];
         assert_eq!(package_prefix(&with_index), "X.key/");
         assert_eq!(package_prefix(&without_index), "");
+    }
+
+    #[test]
+    fn zip_names_are_utf8_without_the_flag() {
+        // One empty stored entry (CRC 0) whose UTF-8 name has no UTF-8 flag (bit 11), as iWork
+        // writes macOS screenshot names ("1.56.04\u{202F}p.m.").
+        let name = "Data/1.56.04\u{202F}p.m.png".as_bytes();
+        let length = name.len() as u16;
+        let mut zip = Vec::new();
+        zip.extend_from_slice(b"PK\x03\x04\x14\x00\x00\x00\x00\x00");
+        zip.extend_from_slice(&[0; 16]); // time, date, crc, sizes
+        zip.extend_from_slice(&length.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+        zip.extend_from_slice(name);
+        let central = zip.len() as u32;
+        zip.extend_from_slice(b"PK\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00");
+        zip.extend_from_slice(&[0; 16]);
+        zip.extend_from_slice(&length.to_le_bytes());
+        zip.extend_from_slice(&[0; 16]); // extra, comment, disk, attributes, local offset 0
+        zip.extend_from_slice(name);
+        let central_size = zip.len() as u32 - central;
+        zip.extend_from_slice(b"PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00");
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+
+        let mut files = Files::new();
+        read_zip(&zip, false, &mut files).expect("valid zip");
+
+        assert!(files.contains_key("Data/1.56.04\u{202F}p.m.png"));
     }
 
     #[test]
