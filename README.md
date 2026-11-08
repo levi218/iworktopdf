@@ -35,12 +35,14 @@ Everything platform-specific lives in `src/platform/`:
 
 ## Acceptance metric
 
-`compare` scores each page twice, both at 100 dpi in colour:
+`compare` scores each page at 100 dpi in colour:
 
-- **Layout**: both pages rendered with their text made invisible, compared per RGB channel
+- **Visual** (pass criterion): both whole pages, text included, compared per RGB channel
   (tolerance 32 after a 2x2 downsample); the score is the fraction of differing pixels.
-- **Text**: every character's code point, origin (within 1pt) and fill colour (tolerance 32);
-  the score is `(total - 2 * matched) / total` over both pages' characters.
+- **Text** (information only): every character's code point, origin (within 1pt) and fill colour
+  (tolerance 32); the score is `(total - 2 * matched) / total` over both pages' characters. Text
+  drawn as pixels or paths (e.g. a rasterised pasted PDF) is unmatched here even when it looks right.
 
-A page passes when both scores are below 1%. `--diff-dir` writes colour PNGs per failing page:
+A page passes when its visual score is below 1%. `IWORK2PDF_PAGES=1` lists every page's scores.
+`--diff-dir` writes colour PNGs per differing page:
 expected | actual | faded expected with differences in magenta.
