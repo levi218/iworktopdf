@@ -1641,12 +1641,37 @@ impl<'a> LineBuilder<'a> {
                 .map(|(piece, _)| (*piece.style).clone())
                 .collect()
         };
+        // A glyph from a fallback face raises the line to that face's ascent and adds its leading
+        // below, but its descent is not counted (measured: a Hiragino Sans arrow adds 0.5em under
+        // a 64pt Gill Sans line and lowers a Calibri title; PingFang SC kanji leave a centred
+        // Helvetica Neue line in place).
+        let fallbacks: Vec<TextStyle> = self
+            .pieces
+            .iter()
+            .flat_map(|(piece, _)| {
+                shaper::fallback_faces(&piece.text, &piece.font)
+                    .into_iter()
+                    .map(|font_name| TextStyle {
+                        font_name,
+                        bold: false,
+                        italic: false,
+                        ..(*piece.style).clone()
+                    })
+            })
+            .collect();
         let largest = |measure: fn(&TextStyle) -> f32, styles: &[TextStyle]| {
             styles.iter().map(measure).fold(f32::MIN, f32::max)
         };
         let mut height = largest(text::line_height, &styles);
         let mut ascent = largest(text::ascent, &styles);
-        let leading = largest(text::trailing_leading, &styles);
+        let mut leading = largest(text::trailing_leading, &styles);
+        if !fallbacks.is_empty() {
+            let raised = largest(text::ascent, &fallbacks) - ascent;
+            let added = largest(text::trailing_leading, &fallbacks) - leading;
+            ascent += raised.max(0.0);
+            leading += added.max(0.0);
+            height += raised.max(0.0) + added.max(0.0);
+        }
         let single_spaced = styles
             .iter()
             .all(|style| style.line_spacing_mode == 0 && style.line_spacing == 1.0);

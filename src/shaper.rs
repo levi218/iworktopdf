@@ -6,7 +6,9 @@
 use crate::fonts;
 use crate::platform;
 use serde_json::Value;
-use skia_safe::{Canvas, Font, FontMgr, FontStyle, Paint, Point, TextBlobBuilder, Typeface};
+use skia_safe::{
+    font_style, Canvas, Font, FontMgr, FontStyle, Paint, Point, TextBlobBuilder, Typeface,
+};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -204,24 +206,62 @@ fn fallback(primary: &Typeface, code_point: char) -> Option<Typeface> {
     found
 }
 
-/// Apple's cascade puts Hiragino Sans first for Japanese/CJK (measured: Helvetica Neue text with
-/// kana exports with HiraginoSans-W3). Used when that face is available.
+/// Apple's cascade for a character the styled face lacks (measured on Helvetica Neue and Gill
+/// Sans text): Han ideographs in PingFang SC ("日本語" without kana), kana, CJK punctuation,
+/// fullwidth forms and the Miscellaneous Symbols and Arrows block ("⬆") in Hiragino Sans. Used
+/// when those faces are available.
 fn cascade_font(primary: &Typeface, code_point: char) -> Option<Typeface> {
-    let cjk = matches!(
-        u32::from(code_point),
-        0x3000..=0x30FF | 0x3400..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF
-    );
-    if !cjk {
-        return None;
-    }
     let heavy = *primary.font_style().weight() >= 600;
-    let weight_face = if heavy {
-        "HiraginoSans-W6"
-    } else {
-        "HiraginoSans-W3"
+    let typeface = match u32::from(code_point) {
+        0x3400..=0x9FFF | 0xF900..=0xFAFF => {
+            let weight = if heavy {
+                font_style::Weight::SEMI_BOLD
+            } else {
+                font_style::Weight::NORMAL
+            };
+            let style = FontStyle::new(
+                weight,
+                font_style::Width::NORMAL,
+                font_style::Slant::Upright,
+            );
+            FontMgr::new().match_family_style("PingFang SC", style)?
+        }
+        0x2B00..=0x2BFF | 0x3000..=0x30FF | 0xFF00..=0xFFEF => {
+            let weight_face = if heavy {
+                "HiraginoSans-W6"
+            } else {
+                "HiraginoSans-W3"
+            };
+            fonts::user(weight_face).or_else(|| fonts::user("HiraginoSans-W3"))?
+        }
+        _ => return None,
     };
-    let typeface = fonts::user(weight_face).or_else(|| fonts::user("HiraginoSans-W3"))?;
     (typeface.unichar_to_glyph(code_point as i32) != 0).then_some(typeface)
+}
+
+/// PostScript names of the fallback faces a string's characters take (those its font lacks).
+///
+/// # Arguments
+///
+/// * `text` - The string
+/// * `font` - The tagged font it is set in
+///
+/// # Returns
+///
+/// Each fallback face's PostScript name once, in first-use order.
+pub fn fallback_faces(text: &str, font: &TaggedFont) -> Vec<String> {
+    let primary = font.font.typeface();
+    let mut names: Vec<String> = Vec::new();
+    for code_point in visible(text).chars() {
+        if code_point.is_whitespace() || font.font.unichar_to_glyph(code_point as i32) != 0 {
+            continue;
+        }
+        let name = fallback(&primary, code_point).and_then(|face| face.post_script_name());
+        if let Some(name) = name.filter(|name| !names.contains(name)) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn is_variation_selector(character: char) -> bool {
@@ -688,6 +728,25 @@ mod tests {
         assert!(shaped.width > shaped.positions[1]);
         assert!((measure("ab", &font) - shaped.width).abs() < 1e-4);
         assert_eq!(measure("", &font), 0.0);
+    }
+
+    #[test]
+    fn cascade_matches_apples_cjk_and_arrow_faces() {
+        // Needs the installed Hiragino Sans (macOS).
+        if fonts::user("HiraginoSans-W3").is_none() {
+            return;
+        }
+        let font = TaggedFont {
+            font: Font::from_typeface(fonts::get(Some("GillSans"), false, false), 64.0),
+            name: "GillSans".into(),
+            tracking: 0.0,
+        };
+        assert_eq!(fallback_faces("Data Size ⬆", &font), ["HiraginoSans-W3"]);
+        assert!(fallback_faces("Data Size", &font).is_empty());
+        // Han ideographs take PingFang SC where the system has it; kana stay in Hiragino Sans.
+        let han = fallback_faces("日本語", &font);
+        assert!(han == ["PingFangSC-Regular"] || han == ["HiraginoSans-W3"]);
+        assert_eq!(fallback_faces("かな", &font), ["HiraginoSans-W3"]);
     }
 
     #[test]

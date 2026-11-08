@@ -641,6 +641,21 @@ impl ShapeItem {
             {
                 top -= height / 2.0;
             }
+        } else if storage != 0
+            && flags.has(3)
+            && (flags.int(3) & 2) == 0
+            && flags.message(2).float(2) > 0.0
+        {
+            // A middle-aligned box whose height is not valid (geometry flags without bit 1) is
+            // centred on the stored y, fill and text alike (measured: a 10-line Keynote code box
+            // 383pt down spans 170 to 596; a 148pt caption box at y 669.5 fills 595.5 to 743.5).
+            let default_align = if !bare && body.boolean(6) { 0 } else { 1 };
+            let vertical_align = styles
+                .text_frame_prop(style, 2)
+                .map_or(default_align, |props| props.int(2));
+            if vertical_align == 1 {
+                top -= height / 2.0;
+            }
         }
         ShapeItem {
             styles: styles.clone(),
@@ -1169,22 +1184,12 @@ impl ShapeItem {
             height - insets.bottom,
         );
         let flags = self.shape.message(1).message(1);
-        let height_invalid = flags.has(3) && (flags.int(3) & 2) == 0;
         if grows_upward {
             rect = Rect::new(
                 insets.left,
                 insets.top - height,
                 width - insets.right,
                 -insets.bottom,
-            );
-        } else if vertical_align == 1 && height_invalid && flags.message(2).float(2) > 0.0 {
-            // Middle-aligned, the text centres on the stored y (measured: a 10-line Keynote code box
-            // 383pt down spans 170 to 596). A zero stored height keeps the text hanging from y.
-            rect = Rect::new(
-                insets.left,
-                insets.top - height / 2.0,
-                width - insets.right,
-                height / 2.0 - insets.bottom,
             );
         }
         // Shrink text to fit (shape style field 1): font sizes step down by 1% until the text fits
