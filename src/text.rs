@@ -223,9 +223,18 @@ impl TextStyle {
         font.set_edging(FontEdging::AntiAlias);
         font.set_linear_metrics(true);
         font.set_hinting(FontHinting::None);
+        // A face neither here nor on Apple's Mac is set in Helvetica by both: tag the face drawn
+        // so it is shaped with Helvetica's own kerning (measured: BitstreamVeraSansMono code
+        // text exports with Helvetica's "Te" pair).
+        let name = match typeface.post_script_name() {
+            Some(drawn) if fonts::is_exact(&drawn) && fonts::is_unknown_family(&variant_name) => {
+                drawn
+            }
+            _ => variant_name,
+        };
         TaggedFont {
             font,
-            name: variant_name,
+            name,
             tracking: self.tracking,
         }
     }
