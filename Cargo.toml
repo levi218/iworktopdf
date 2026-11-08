@@ -12,6 +12,8 @@ thiserror = "2.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 # TIFF Deflate strips and the compare cache.
 flate2 = "1.1"
+# Knuth-Liang hyphenation (US English patterns) for Pages documents that hyphenate.
+hyphenation = { version = "0.8", features = ["embed_en-us"] }
 # Progress bars for batch conversion and comparison.
 indicatif = "0.17"
 # Diagnostics (IWORK2PDF_VERBOSE=1 or RUST_LOG=debug).

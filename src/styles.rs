@@ -22,6 +22,10 @@ pub mod ctx {
         pub static KEYNOTE: Cell<bool> = const { Cell::new(false) };
         /// Pages' text engine lays some lines out differently (see text.rs).
         pub static PAGES_LAYOUT: Cell<bool> = const { Cell::new(false) };
+        /// The Pages document hyphenates (TP.SettingsArchive field 9).
+        pub static HYPHENATION: Cell<bool> = const { Cell::new(false) };
+        /// The Pages document uses its fonts' ligatures (TP.SettingsArchive field 10).
+        pub static LIGATURES: Cell<bool> = const { Cell::new(false) };
         /// The Keynote slide width, set per slide.
         pub static SLIDE_WIDTH: Cell<f32> = const { Cell::new(0.0) };
         /// Set while painting a table cell's fill: Apple draws a cell gradient's stops opaque.

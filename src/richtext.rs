@@ -92,6 +92,9 @@ pub struct Paragraph {
     pub empty_style: Option<TextStyle>,
     /// Widow and orphan control (paragraph style field 26).
     pub widow_control: bool,
+    /// Words that overflow a line break at hyphenation points (document setting and paragraph
+    /// style field 8).
+    pub hyphenate: bool,
 }
 
 impl Paragraph {
@@ -111,6 +114,7 @@ impl Paragraph {
             keep_with_next: false,
             empty_style: None,
             widow_control: false,
+            hyphenate: false,
         }
     }
 
@@ -780,6 +784,12 @@ impl RichText {
         paragraph.bullet_scale = bullet_scale;
         paragraph.keep_with_next = flag(10);
         paragraph.widow_control = flag(26);
+        // Hyphenation is on unless the paragraph style turns it off.
+        paragraph.hyphenate = ctx::HYPHENATION.get()
+            && reader
+                .styles
+                .find(style_id, 12, 8)
+                .is_none_or(|props| props.boolean(8));
         paragraph.empty_style = empty_style;
         paragraph.section = at_keep(&reader.sections, position);
         paragraph.footnotes = reader
@@ -1018,6 +1028,34 @@ impl RichText {
         }
     }
 
+    /// Width added to each space of a justified line (not its last) so it fills the column.
+    fn justify_extra(&self, line: &Line, width: f32, natural: HAlign) -> f32 {
+        let paragraph = &self.paragraphs[line.paragraph];
+        if self.align(line, natural) != HAlign::Justify
+            || line.last
+            || line.pieces.len() < 2
+            || paragraph.rtl()
+        {
+            return 0.0;
+        }
+        let style = &paragraph.style;
+        let indent = if line.first {
+            style.first_indent
+        } else {
+            style.left_indent
+        };
+        let available = width - indent - style.right_indent - line.narrowed;
+        let spaces: usize = line.pieces[..line.pieces.len() - 1]
+            .iter()
+            .map(|(piece, _)| piece.text.matches(' ').count())
+            .sum();
+        if spaces == 0 {
+            0.0
+        } else {
+            (available - line.width) / spaces as f32
+        }
+    }
+
     /// Where a line starts: indent plus alignment within the available width.
     fn line_start(&self, line: &Line, (left, width): (f32, f32), natural: HAlign) -> f32 {
         let style = &self.paragraphs[line.paragraph].style;
@@ -1170,27 +1208,7 @@ impl RichText {
             let left = self.line_start(line, (rect.left, rect.width()), natural);
             let baseline = line_top + line.ascent;
             self.draw_bullet(canvas, line, rect.left, baseline);
-            // Justified lines spread the extra width over their spaces.
-            let mut extra = 0.0;
-            if self.align(line, natural) == HAlign::Justify
-                && !line.last
-                && line.pieces.len() > 1
-                && !paragraph.rtl()
-            {
-                let indent = if line.first {
-                    style.first_indent
-                } else {
-                    style.left_indent
-                };
-                let available = rect.width() - indent - style.right_indent;
-                let spaces: usize = line.pieces[..line.pieces.len() - 1]
-                    .iter()
-                    .map(|(piece, _)| piece.text.matches(' ').count())
-                    .sum();
-                if spaces > 0 {
-                    extra = (available - line.width) / spaces as f32;
-                }
-            }
+            let extra = self.justify_extra(line, rect.width(), natural);
             self.draw_backgrounds(
                 canvas,
                 line,
@@ -1311,6 +1329,33 @@ impl RichText {
     }
 }
 
+/// Byte offsets where `word` may be hyphenated: inside its letters (US English patterns), never
+/// in a word holding digits or other symbols between its letters.
+fn hyphenation_points(word: &str) -> Vec<usize> {
+    use hyphenation::{Hyphenator, Language, Load, Standard};
+    thread_local! {
+        static DICTIONARY: Option<Standard> = Standard::from_embedded(Language::EnglishUS).ok();
+    }
+    let start = word.find(char::is_alphabetic).unwrap_or(word.len());
+    let end = word.rfind(char::is_alphabetic).map_or(start, |index| {
+        index + word[index..].chars().next().map_or(0, char::len_utf8)
+    });
+    let letters = &word[start..end];
+    if letters.is_empty() || !letters.chars().all(char::is_alphabetic) {
+        return Vec::new();
+    }
+    DICTIONARY.with(|dictionary| {
+        dictionary.as_ref().map_or_else(Vec::new, |dictionary| {
+            dictionary
+                .hyphenate(letters)
+                .breaks
+                .into_iter()
+                .map(|index| start + index)
+                .collect()
+        })
+    })
+}
+
 /// Splits a paragraph into words that keep their trailing spaces; tabs are words of their own and
 /// explicit line breaks are `None`.
 fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
@@ -1329,6 +1374,11 @@ fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
         while start < characters.len() {
             match characters[start] {
                 '\n' | '\t' => {
+                    // A line break's own font sizes the line it ends (measured: a Courier line
+                    // ended by a Helvetica break is 0.3pt taller).
+                    if characters[start] == '\n' && !current.is_empty() {
+                        current.push(piece(String::new(), 0.0));
+                    }
                     if !current.is_empty() {
                         words.push(Some(std::mem::take(&mut current)));
                     }
@@ -1450,7 +1500,11 @@ impl<'a> LineBuilder<'a> {
         let Some(last) = word.last() else { return };
         let word_width: f32 =
             word.iter().map(|piece| piece.width).sum::<f32>() - last.width + trimmed_width(last);
+        let mut word = word;
         if wrap && !self.pieces.is_empty() && self.pen + word_width > self.available(lines) + 0.01 {
+            if let Some(rest) = self.hyphenate(&word, lines) {
+                word = vec![rest];
+            }
             self.flush(lines);
         }
         for piece in word {
@@ -1470,6 +1524,46 @@ impl<'a> LineBuilder<'a> {
             self.pieces.push((piece, self.pen));
             self.pen += width;
         }
+    }
+
+    /// Ends the line with the longest hyphenated start of a one-piece word that fits after the pen.
+    ///
+    /// # Returns
+    ///
+    /// The rest of the word, or `None` when the paragraph does not hyphenate or nothing fits.
+    fn hyphenate(&mut self, word: &[Piece], lines: &[Line]) -> Option<Piece> {
+        // ponytail: words split across style runs are not hyphenated.
+        let [piece] = word else { return None };
+        if !self.paragraph.hyphenate {
+            return None;
+        }
+        let room = self.available(lines) - self.pen + 0.01;
+        let split = hyphenation_points(&piece.text)
+            .into_iter()
+            .rev()
+            .find(|&split| {
+                shaper::measure(&format!("{}-", &piece.text[..split]), &piece.font) <= room
+            })?;
+        let head = format!("{}-", &piece.text[..split]);
+        let tail = piece.text[split..].to_string();
+        let (head_width, tail_width) = (
+            shaper::measure(&head, &piece.font),
+            shaper::measure(&tail, &piece.font),
+        );
+        self.pieces.push((
+            Piece {
+                text: head,
+                width: head_width,
+                ..piece.clone()
+            },
+            self.pen,
+        ));
+        self.pen += head_width;
+        Some(Piece {
+            text: tail,
+            width: tail_width,
+            ..piece.clone()
+        })
     }
 
     /// Breaks a word wider than the line by characters.
@@ -1711,6 +1805,10 @@ struct Contour {
     margin: f32,
 }
 
+/// Space between consecutive footnotes (measured: Pages notes 23pt apart, lines inside a note
+/// 13pt).
+const NOTE_GAP: f32 = 10.0;
+
 /// The state of one flow of text through pages.
 struct Flow<'a> {
     text: &'a RichText,
@@ -1765,12 +1863,13 @@ impl<'a> Flow<'a> {
         self.cursor_y = self.area.top;
     }
 
-    /// Footnotes take a zone 15pt plus their text tall at the page bottom.
+    /// Footnotes take a zone 15pt plus their text tall at the page bottom, with `NOTE_GAP` between
+    /// consecutive notes.
     fn notes_height(notes: &[(RichText, f32)]) -> f32 {
         if notes.is_empty() {
             0.0
         } else {
-            15.0 + notes.iter().map(|note| note.1).sum::<f32>()
+            15.0 + notes.iter().map(|note| note.1 + NOTE_GAP).sum::<f32>() - NOTE_GAP
         }
     }
 
@@ -1799,7 +1898,7 @@ impl<'a> Flow<'a> {
                 true,
                 HAlign::Left,
             );
-            note_top += height;
+            note_top += height + NOTE_GAP;
         }
     }
 
@@ -1949,32 +2048,42 @@ impl<'a> Flow<'a> {
         ))
     }
 
-    /// Height that must fit with this line: keep with next (the paragraph's lines plus the next
-    /// paragraph's first line, two with widow control) or widow control (no lone first or last line
-    /// at a page edge).
+    /// Height that must fit with this line: keep with next (the paragraph's lines, those of the
+    /// kept paragraphs after it, then the next paragraph's first line, two with widow control) or
+    /// widow control (no lone first or last line at a page edge, three-line paragraphs whole).
     fn keep_height(&self, lines: &[Line], index: usize) -> f32 {
         let line = &lines[index];
         let paragraph = &self.text.paragraphs[line.paragraph];
         if line.first && paragraph.keep_with_next {
-            let last = (index..lines.len())
-                .find(|&other| lines[other].last)
-                .unwrap_or(lines.len());
-            let mut height: f32 = lines[index..last.min(lines.len())]
-                .iter()
-                .map(|other| other.height)
-                .sum();
-            if let Some(last_line) = lines.get(last) {
-                height += last_line.height + paragraph.style.space_after;
+            // Paragraphs kept with their next one chain (measured: a heading over a kept
+            // sub-heading moves to the next page with it and its text's first lines).
+            let mut height = 0.0;
+            let mut current = index;
+            loop {
+                let kept = &self.text.paragraphs[lines[current].paragraph];
+                let last = (current..lines.len())
+                    .find(|&other| lines[other].last)
+                    .unwrap_or(lines.len() - 1);
+                height += lines[current..=last]
+                    .iter()
+                    .map(|other| other.height)
+                    .sum::<f32>()
+                    + kept.style.space_after;
+                let Some(next) = lines.get(last + 1).filter(|next| next.blocks.is_none()) else {
+                    return 0.0;
+                };
+                let next_paragraph = &self.text.paragraphs[next.paragraph];
+                height += next_paragraph.style.space_before;
+                if next_paragraph.keep_with_next {
+                    current = last + 1;
+                    continue;
+                }
+                height += next.height - next.leading;
+                if next_paragraph.widow_control && !next.last {
+                    height += lines.get(last + 2).map_or(0.0, |line| line.height);
+                }
+                return height;
             }
-            let Some(next) = lines.get(last + 1).filter(|next| next.blocks.is_none()) else {
-                return 0.0;
-            };
-            let next_paragraph = &self.text.paragraphs[next.paragraph];
-            height += next_paragraph.style.space_before + next.height - next.leading;
-            if next_paragraph.widow_control && !next.last {
-                height += lines.get(last + 2).map_or(0.0, |line| line.height);
-            }
-            return height;
         }
         if !paragraph.widow_control || line.blocks.is_some() {
             return 0.0;
@@ -1985,10 +2094,20 @@ impl<'a> Flow<'a> {
         else {
             return 0.0;
         };
-        // Orphan: the first line alone at the bottom; widow: the last line alone on top.
-        let orphan = line.first && !line.last;
-        let widow = !line.first && next.last && !(index > 0 && lines[index - 1].first);
-        if orphan || widow {
+        // Orphan: the first line alone at the bottom; widow: the last line alone on top. A
+        // paragraph of three lines cannot leave two on each side, so it moves whole (measured:
+        // "acos(x)", its description and an empty line start the next page together).
+        if line.first && !line.last {
+            let count = lines[index..]
+                .iter()
+                .position(|other| other.last)
+                .map_or(lines.len() - index, |last| last + 1);
+            let kept = &lines[index..index + if count == 3 { 3 } else { 2 }];
+            return kept.iter().map(|other| other.height).sum::<f32>()
+                - kept.last().map_or(0.0, |other| other.leading);
+        }
+        let widow = next.last && !(index > 0 && lines[index - 1].first);
+        if widow {
             line.height + next.height - next.leading
         } else {
             0.0
@@ -2018,16 +2137,12 @@ impl<'a> Flow<'a> {
             } else {
                 Vec::new()
             };
-            // An anchored object that does not fit below its anchor on this page moves to the top of
-            // the next one, and the anchor's text continues below it (measured in Pages: a 468pt
-            // screenshot 166pt under its paragraph starts the next page).
-            let move_anchor = self.cursor_y > self.area.top
-                && line.anchors.iter().flatten().any(|(item, _, vertical, _)| {
-                    let height = item.flow_bounds().height();
-                    !is_page_relative(*vertical)
-                        && anchor_top(*vertical, self.cursor_y) + height > self.area.bottom + 0.01
-                        && height <= self.area.height()
-                });
+            // An anchored object that does not fit below its anchor on this page moves to the next
+            // one with its line; there it keeps its offset when that fits, else it moves to the top
+            // and the anchor's text continues below it (measured in Pages: a 468pt screenshot
+            // 166pt under its paragraph starts the next page; a 297pt diagram 338pt under its
+            // caption keeps that offset).
+            let move_anchor = self.cursor_y > self.area.top && self.anchors_overflow(line);
             let mut placement = AnchorPlacement {
                 line_top: self.cursor_y,
                 pin_top: false,
@@ -2068,7 +2183,7 @@ impl<'a> Flow<'a> {
                 self.contours.clear();
                 placement = AnchorPlacement {
                     line_top: self.cursor_y,
-                    pin_top: move_anchor,
+                    pin_top: move_anchor && self.anchors_overflow(line),
                 };
                 self.add_anchor_obstacles(line, placement);
                 record_insets(found.as_deref_mut(), key, self.clear(line));
@@ -2083,6 +2198,17 @@ impl<'a> Flow<'a> {
         }
         self.flush_notes();
         self.pages
+    }
+
+    /// Whether one of the line's anchored objects, no taller than the page, reaches past the page
+    /// bottom when it hangs from the line at the cursor.
+    fn anchors_overflow(&self, line: &Line) -> bool {
+        line.anchors.iter().flatten().any(|(item, _, vertical, _)| {
+            let height = item.flow_bounds().height();
+            !is_page_relative(*vertical)
+                && anchor_top(*vertical, self.cursor_y) + height > self.area.bottom + 0.01
+                && height <= self.area.height()
+        })
     }
 
     fn draw_anchors(&mut self, line: &Line, placement: AnchorPlacement) {
@@ -2199,14 +2325,17 @@ impl<'a> Flow<'a> {
             Point::new(left, cursor_y),
             (area.left, area.right),
         );
+        let extra = self.text.justify_extra(line, area.width(), self.natural);
+        let mut shift = 0.0;
         for (piece, offset) in self.text.visual(line) {
             text::draw_line(
                 canvas,
                 piece.text.trim_end(),
-                Point::new(left + offset, baseline),
+                Point::new(left + offset + shift, baseline),
                 &piece.font,
                 &piece.style,
             );
+            shift += extra * piece.text.matches(' ').count() as f32;
         }
         if line.first {
             self.paragraph_top = cursor_y;
@@ -2298,6 +2427,84 @@ mod tests {
         )));
     }
 
+    /// A paragraph of one plain run.
+    fn plain(text: &str) -> Paragraph {
+        let style = TextStyle::default();
+        let run = Run {
+            text: text.into(),
+            style: Rc::new(style.clone()),
+        };
+        Paragraph::new(vec![run], style)
+    }
+
+    #[test]
+    fn hyphenation_points_stay_inside_letters() {
+        let points = hyphenation_points("(classifier),");
+        assert!(!points.is_empty());
+        assert!(points
+            .iter()
+            .all(|&point| point > 1 && point < "(classifier".len()));
+        assert!(hyphenation_points("2015103042").is_empty());
+        assert!(hyphenation_points("scikit-learn").is_empty());
+    }
+
+    #[test]
+    fn overflowing_words_hyphenate_only_when_enabled() {
+        let mut paragraph = plain("aaaa hyphenation");
+        let font = paragraph.runs[0].style.font();
+        let width = shaper::measure("aaaa hyphen-", &font) + 1.0;
+        let first_line_end = |paragraph: &Paragraph| {
+            let text = RichText {
+                paragraphs: vec![paragraph.clone()],
+                ..RichText::default()
+            };
+            let lines = text.layout(width, true);
+            lines[0].pieces.last().map(|(piece, _)| piece.text.clone())
+        };
+        assert_eq!(first_line_end(&paragraph).as_deref(), Some("aaaa "));
+        paragraph.hyphenate = true;
+        assert!(first_line_end(&paragraph).is_some_and(|end| end.ends_with('-')));
+    }
+
+    #[test]
+    fn kept_paragraphs_chain_and_short_paragraphs_stay_whole() {
+        let mut heading = plain("Heading");
+        heading.keep_with_next = true;
+        let mut subheading = plain("Subheading");
+        subheading.keep_with_next = true;
+        let mut three = plain("one\ntwo\nthree");
+        three.widow_control = true;
+        let mut four = plain("one\ntwo\nthree\nfour");
+        four.widow_control = true;
+        let text = RichText {
+            paragraphs: vec![heading, subheading, plain("Body"), three, four],
+            ..RichText::default()
+        };
+        let lines = text.layout(500.0, true);
+        let mut sink = Scratch::default();
+        let flow = Flow::new(
+            &text,
+            &mut sink,
+            (Rect::from_wh(500.0, 700.0), HAlign::Left),
+            None,
+        );
+        let span = |from: usize, to: usize| {
+            lines[from..to].iter().map(|line| line.height).sum::<f32>() - lines[to - 1].leading
+        };
+        // Heading, sub-heading and the body's line move together.
+        assert!((flow.keep_height(&lines, 0) - span(0, 3)).abs() < 1e-3);
+        // Three lines cannot split two and two; four can.
+        assert!((flow.keep_height(&lines, 3) - span(3, 6)).abs() < 1e-3);
+        assert!((flow.keep_height(&lines, 6) - span(6, 8)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn footnotes_are_spaced_apart() {
+        let notes = [(RichText::default(), 13.0), (RichText::default(), 26.0)];
+        assert_eq!(Flow::notes_height(&notes), 15.0 + 13.0 + NOTE_GAP + 26.0);
+        assert_eq!(Flow::notes_height(&[]), 0.0);
+    }
+
     #[test]
     fn words_keep_spaces_and_break_on_tabs() {
         let style = TextStyle::default();
@@ -2324,7 +2531,7 @@ mod tests {
                 word(&["ab "]),
                 word(&["cd"]),
                 word(&["\t"]),
-                word(&["ef"]),
+                word(&["ef", ""]),
                 None,
                 word(&["gh"])
             ]
