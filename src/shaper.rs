@@ -128,6 +128,13 @@ fn kerning_for(font: &TaggedFont) -> Option<&'static HashMap<String, i32>> {
     tables().kerning.get(&font.name.to_lowercase())
 }
 
+/// A bundled clone whose own widths, kerning and ligatures are the original's: Carlito for
+/// Calibri ("Postscript" and the "ti" ligature in "adoption" match Apple's export to 0.1pt, where
+/// harvested pairs without ligatures are 2pt off).
+fn own_tables(font: &TaggedFont) -> bool {
+    font.font.typeface().family_name() == "Carlito"
+}
+
 /// Faces whose substitute already has the same advance widths.
 fn metric_compatible(postscript_name: &str) -> bool {
     let lower = postscript_name.to_lowercase();
@@ -152,7 +159,11 @@ fn metric_compatible(postscript_name: &str) -> bool {
 
 /// Apple's advance widths for fonts substituted by a face with different metrics.
 fn apple_widths_for(font: &TaggedFont) -> Option<&'static HashMap<String, f32>> {
-    if metric_compatible(&font.name) || fonts::is_exact(&font.name) {
+    // A same-width substitute only counts when one resolved: a face with none here falls back to
+    // Helvetica and takes Apple's widths (Calibri on a Mac: titles 10% too wide otherwise).
+    if fonts::is_exact(&font.name)
+        || (metric_compatible(&font.name) && !fonts::is_unknown_family(&font.name))
+    {
         return None;
     }
     tables()
@@ -284,11 +295,12 @@ pub fn layout(text: &str, font: &TaggedFont) -> Shaped {
     }
     let size = font.font.size();
     let tracking = font.tracking * size;
-    if fonts::is_exact(&font.name) && faces.iter().all(Option::is_none) {
-        // The document's own font: shape with HarfBuzz so its kerning applies. Callers place
-        // one glyph per character, so a run its ligatures merge is shaped without them.
+    if (fonts::is_exact(&font.name) || own_tables(font)) && faces.iter().all(Option::is_none) {
+        // The document's own font (or a clone with its tables): shape with HarfBuzz so its
+        // kerning and ligatures apply. Tracked text is set without ligatures.
         let one_per_character = |shaped: &Shaped| shaped.glyphs.len() == glyphs.len();
-        if let Some(shaped) = shape_exact(&text, &font.font, true)
+        let ligatures = font.tracking == 0.0;
+        if let Some(shaped) = shape_exact(&text, &font.font, ligatures)
             .filter(one_per_character)
             .or_else(|| shape_exact(&text, &font.font, false).filter(one_per_character))
         {
@@ -401,19 +413,42 @@ fn shape_exact(text: &str, font: &Font, ligatures: bool) -> Option<Shaped> {
     let pair_kerning =
         |left: u16, right: u16| kerx.map_or(0.0, |table| kerx_kerning(table, left, right) as f32);
     let infos = shaped.glyph_infos();
+    // Callers place one glyph per character: a ligature takes its first character's slot and
+    // the characters it absorbed get blank (space) glyphs at its end, as Apple's export does.
+    let character_starts: Vec<usize> = text.char_indices().map(|(start, _)| start).collect();
+    let blank = font.unichar_to_glyph(' ' as i32);
+    let mut absorbed = Vec::with_capacity(infos.len());
+    for (index, info) in infos.iter().enumerate() {
+        let start = info.cluster as usize;
+        let end = infos
+            .get(index + 1)
+            .map_or(text.len(), |next| next.cluster as usize);
+        let characters = character_starts
+            .iter()
+            .filter(|&&offset| offset >= start && offset < end)
+            .count();
+        absorbed.push(characters.saturating_sub(1));
+    }
     let (mut glyphs, mut positions, mut pen) = (
-        Vec::with_capacity(infos.len()),
-        Vec::with_capacity(infos.len()),
+        Vec::with_capacity(character_starts.len()),
+        Vec::with_capacity(character_starts.len()),
         0f32,
     );
-    for (info, position) in infos.iter().zip(shaped.glyph_positions()) {
+    let mut previous = None;
+    for ((info, position), &extra) in infos.iter().zip(shaped.glyph_positions()).zip(&absorbed) {
         let glyph = info.glyph_id as u16;
-        if let Some(&previous) = glyphs.last() {
+        if let Some(previous) = previous {
             pen += pair_kerning(previous, glyph) * scale;
         }
+        previous = Some(glyph);
         glyphs.push(glyph);
         positions.push(pen + position.x_offset as f32 * scale);
         pen += position.x_advance as f32 * scale;
+        if extra > 0 && blank == 0 {
+            return None;
+        }
+        glyphs.extend(std::iter::repeat_n(blank, extra));
+        positions.extend(std::iter::repeat_n(pen, extra));
     }
     Some(Shaped {
         glyphs,
@@ -653,6 +688,27 @@ mod tests {
         assert!(shaped.width > shaped.positions[1]);
         assert!((measure("ab", &font) - shaped.width).abs() < 1e-4);
         assert_eq!(measure("", &font), 0.0);
+    }
+
+    #[test]
+    fn calibri_takes_carlitos_ligatures_one_glyph_per_character() {
+        let typeface = fonts::get(Some("Calibri"), false, false);
+        // Needs the bundled Carlito (fonts/open); elsewhere Helvetica stands in.
+        if typeface.family_name() != "Carlito" {
+            return;
+        }
+        let font = TaggedFont {
+            font: Font::from_typeface(&typeface, 84.0),
+            name: "Calibri".into(),
+            tracking: 0.0,
+        };
+        // Apple's export sets "adoption" with the "ti" ligature, 307.6pt wide at 84pt.
+        let shaped = layout("adoption", &font);
+        assert_eq!(shaped.glyphs.len(), 8);
+        assert!((shaped.width - 307.66).abs() < 0.05);
+        // The ligature's second character is a blank at the ligature's end.
+        assert_eq!(shaped.glyphs[5], font.font.unichar_to_glyph(' ' as i32));
+        assert_eq!(shaped.positions[5], shaped.positions[6]);
     }
 
     #[test]

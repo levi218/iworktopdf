@@ -667,7 +667,24 @@ impl ShapeItem {
     ///
     /// * `bottom` - The lowest y the shape may reach
     pub fn keep_above(&mut self, bottom: f32) {
-        self.origin.y = self.origin.y.min(bottom - self.height);
+        // Text that grows upward from the stored y already ends there.
+        if !self.text_grows_upward() {
+            self.origin.y = self.origin.y.min(bottom - self.height);
+        }
+    }
+
+    /// Whether the text sits above the stored position instead of in the box: a bottom-aligned
+    /// box whose geometry flags lack bit 1 (height not valid) grows upward from y (measured: a
+    /// Keynote slide header sits above y; a slide number stored 19pt past the slide bottom ends
+    /// 10pt above it).
+    fn text_grows_upward(&self) -> bool {
+        let default_align = if self.is_text_box { 0 } else { 1 };
+        let vertical_align = self
+            .styles
+            .text_frame_prop(self.style, 2)
+            .map_or(default_align, |props| props.int(2));
+        let flags = self.shape.message(1).message(1);
+        vertical_align == 2 && flags.has(3) && (flags.int(3) & 2) == 0
     }
 
     /// Re-routes a connection line between the current frames of the shapes it joins
@@ -1121,17 +1138,23 @@ impl ShapeItem {
         if self.auto_width && width <= 0.01 && height <= 0.01 {
             return Some(self.zero_size_layout(text, insets, vertical_align));
         }
+        let grows_upward = self.text_grows_upward();
         if self.auto_width {
             let shift = match align {
                 HAlign::Center => width / 2.0,
                 HAlign::Right => width,
                 _ => 0.0,
             };
+            let (top, bottom) = if grows_upward {
+                (insets.top - height, -insets.bottom)
+            } else {
+                (insets.top, height - insets.bottom)
+            };
             let rect = Rect::new(
                 insets.left - shift,
-                insets.top,
+                top,
                 width - insets.right - shift,
-                height - insets.bottom,
+                bottom,
             );
             return Some(TextLayout {
                 text,
@@ -1147,9 +1170,7 @@ impl ShapeItem {
         );
         let flags = self.shape.message(1).message(1);
         let height_invalid = flags.has(3) && (flags.int(3) & 2) == 0;
-        if vertical_align == 2 && height_invalid {
-            // Geometry flags without bit 1 (height not valid) on a bottom-aligned box: the text grows
-            // upward from the stored position (measured: a Keynote slide header sits above y).
+        if grows_upward {
             rect = Rect::new(
                 insets.left,
                 insets.top - height,
