@@ -132,6 +132,8 @@ pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     ctx::GROW_ROWS.set(extension != "numbers");
     ctx::KEYNOTE.set(extension == "key");
     ctx::PAGES_LAYOUT.set(extension == "pages");
+    ctx::HYPHENATION.set(false);
+    ctx::LIGATURES.set(false);
     ctx::SLIDE_WIDTH.set(0.0);
     ctx::ABOVE_BELOW.with(|rects| rects.borrow_mut().clear());
     formula::reset();
@@ -548,6 +550,18 @@ fn render_pages(styles: &Styles, pdf: &mut PdfPages) -> Result<()> {
     };
     let (top, bottom) = (root.float_or(34, 72.0), root.float_or(35, 72.0));
     ctx::FOOTNOTE_COUNTER.set(0);
+    // TP.SettingsArchive (root field 7): hyphenation (9) and ligatures (10) switches.
+    let settings = doc.body(root.reference(7));
+    ctx::HYPHENATION.set(
+        settings
+            .as_ref()
+            .is_some_and(|settings| settings.boolean(9)),
+    );
+    ctx::LIGATURES.set(
+        settings
+            .as_ref()
+            .is_some_and(|settings| settings.boolean(10)),
+    );
     let body = RichText::from_storage(styles, root.reference(4), &TextStyle::default(), 0);
     let floating = floating_drawables(doc);
     let area = Rect::new(
@@ -712,8 +726,9 @@ struct PagesSink<'a> {
 
 impl PagesSink<'_> {
     /// The page's headers and footers: each section has its own templates, field 23 on its first
-    /// page when field 21 is set, 24 on even pages when field 22 is set, else 25 (measured: a guide
-    /// alternating its running header between even and odd pages).
+    /// page when field 18 or 21 is set, 24 on even pages when field 19 is set, else 25 (measured: a
+    /// guide with a blank first page alternating its running header sets 18 and 19; field 22 is
+    /// set in every document, whose even pages still use 25).
     fn headers_footers(&self, section: u64) -> HeadersFooters {
         let doc = self.styles.doc();
         let section = if section == 0 {
@@ -726,9 +741,9 @@ impl PagesSink<'_> {
         };
         let first = self.previous_section != Some(section);
         let even = (self.index + 1) % 2 == 0;
-        let field = if first && body.int(21) == 1 {
+        let field = if first && (body.int(18) == 1 || body.int(21) == 1) {
             23
-        } else if body.int(22) == 1 && even {
+        } else if body.int(19) == 1 && even {
             24
         } else {
             25
