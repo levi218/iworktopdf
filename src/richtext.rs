@@ -264,6 +264,17 @@ fn number_label(number: i32, number_type: i32) -> String {
     } else {
         (0, 0)
     };
+    let core = number_core(number, family);
+    match punctuation {
+        1 => format!("({core})"),
+        2 => format!("{core})"),
+        _ => format!("{core}."),
+    }
+}
+
+/// A number in a numbering family: 1 upper and 2 lower roman, 3 upper and 4 lower letters,
+/// otherwise decimal.
+fn number_core(number: i32, family: i32) -> String {
     let roman = |mut value: i32| {
         let mut output = String::new();
         let numerals = [
@@ -298,17 +309,12 @@ fn number_label(number: i32, number_type: i32) -> String {
         }
         letters.into_iter().rev().collect::<String>()
     };
-    let core = match family {
+    match family {
         1 => roman(number),
         2 => roman(number).to_lowercase(),
         3 => alphabetic(number),
         4 => alphabetic(number).to_lowercase(),
         _ => number.to_string(),
-    };
-    match punctuation {
-        1 => format!("({core})"),
-        2 => format!("{core})"),
-        _ => format!("{core}."),
     }
 }
 
@@ -489,13 +495,16 @@ impl<'a> StorageReader<'a> {
             let Some(object) = doc.get(id) else { continue };
             match object.typ {
                 2043 => {
+                    // TSWP.NumberAttachmentArchive: kind in its super (1.2, 1: page count) and
+                    // number_format (2, the list number families: 2 is "lower-roman").
                     let count = object.body.message(1).int(2) == 1;
                     let value = if count {
                         ctx::PAGE_COUNT.get()
                     } else {
                         ctx::PAGE_NUMBER.get()
                     };
-                    self.fields.insert(index, value.to_string());
+                    self.fields
+                        .insert(index, number_core(value, object.body.int(2)));
                 }
                 2008 => {
                     let number = ctx::FOOTNOTE_COUNTER.get() + 1;
@@ -2386,6 +2395,8 @@ mod tests {
         assert_eq!(number_label(4, 3), "IV.");
         assert_eq!(number_label(9, 7), "(ix)");
         assert_eq!(number_label(28, 11), "AB)");
+        assert_eq!(number_core(4, 2), "iv");
+        assert_eq!(number_core(12, 0), "12");
     }
 
     #[test]
