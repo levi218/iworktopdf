@@ -1831,11 +1831,76 @@ fn fill_image_id(image: &Proto) -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether an ImageFillArchive's picture is in the package and decodes.
+/// A theme picture's colour ramp: `(position, [red, green, blue])` stops from top to bottom.
+type ThemeRamp = &'static [(f32, [u8; 3])];
+
+/// Keynote theme pictures a package references only by locator (the image lives inside
+/// Keynote.app), keyed by locator without its size suffix ("gradient/gradient_10x7" ->
+/// "gradient/gradient"). Each is a top-to-bottom ramp measured from Apple's exports.
+const THEME_PICTURES: &[(&str, ThemeRamp)] = &[
+    // A 10x7 picture stretched over the slide: near black down to slate.
+    (
+        "gradient/gradient",
+        &[
+            (0.0, [3, 3, 3]),
+            (0.1667, [4, 3, 6]),
+            (0.3333, [6, 5, 33]),
+            (0.4167, [18, 18, 49]),
+            (0.5833, [54, 54, 82]),
+            (0.75, [85, 85, 109]),
+            (1.0, [115, 113, 134]),
+        ],
+    ),
+    // Chipboard texture: its grain stays within the comparison tolerance of the average.
+    (
+        "new_template5/chipboard",
+        &[(0.0, [184, 172, 158]), (1.0, [175, 163, 148])],
+    ),
+];
+
+/// Looks up a theme picture locator ("gradient/gradient_10x7") in `THEME_PICTURES`.
+fn ramp_for_locator(locator: &str) -> Option<ThemeRamp> {
+    let stem = locator.rsplit_once('_').map_or(locator, |(stem, _)| stem);
+    THEME_PICTURES
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|&(_, ramp)| ramp)
+}
+
+/// The built-in ramp for an ImageFillArchive whose picture is a known Keynote theme resource.
+fn theme_ramp(doc: &IwaDocument, image: &Proto) -> Option<ThemeRamp> {
+    ramp_for_locator(&doc.data_locator(fill_image_id(image))?)
+}
+
+/// Whether `paint_fill` can paint an ImageFillArchive: its picture is in the package and
+/// decodes, or it is a known Keynote theme picture.
 pub fn image_available(doc: &IwaDocument, image: &Proto) -> bool {
     doc.read_data(fill_image_id(image))
         .and_then(|bytes| decode(&bytes))
         .is_some()
+        || theme_ramp(doc, image).is_some()
+}
+
+/// Paints a theme ramp top to bottom over `area`.
+fn paint_ramp(canvas: &Canvas, ramp: ThemeRamp, area: Rect) {
+    let colors: Vec<Color> = ramp
+        .iter()
+        .map(|&(_, [red, green, blue])| Color::from_rgb(red, green, blue))
+        .collect();
+    let positions: Vec<f32> = ramp.iter().map(|&(position, _)| position).collect();
+    let mut paint = Paint::default();
+    paint.set_shader(Shader::linear_gradient(
+        (
+            Point::new(area.left, area.top),
+            Point::new(area.left, area.bottom),
+        ),
+        colors.as_slice(),
+        Some(positions.as_slice()),
+        TileMode::Clamp,
+        None,
+        None,
+    ));
+    canvas.draw_rect(area, &paint);
 }
 
 /// Paints a TSD.FillArchive: solid colour, gradient or image.
@@ -1862,20 +1927,29 @@ pub fn paint_fill(
     } else if let Some(gradient) = fill.message_opt(2) {
         paint_gradient(canvas, &gradient, path, bounds);
     } else if let Some(image) = fill.message_opt(3) {
-        // ImageFillArchive: technique 2, size 4, tint 3.
-        let Some(picture) = doc
+        // ImageFillArchive: technique 2, size 4, tint 3. A theme picture the package lacks is
+        // painted from its built-in ramp.
+        let picture = doc
             .read_data(fill_image_id(&image))
-            .and_then(|bytes| decode(&bytes))
-        else {
-            return;
+            .and_then(|bytes| decode(&bytes));
+        let ramp = match picture {
+            Some(_) => None,
+            None => theme_ramp(doc, &image),
         };
+        if picture.is_none() && ramp.is_none() {
+            return;
+        }
         canvas.save();
         canvas.clip_path(path, None, Some(true));
-        let size = image
-            .message_opt(4)
-            .filter(|size| size.float(1) > 0.0 && size.float(2) > 0.0)
-            .map(|size| (size.float(1), size.float(2)));
-        draw_image_fill(canvas, &picture, bounds, image.int(2), size);
+        if let Some(picture) = picture {
+            let size = image
+                .message_opt(4)
+                .filter(|size| size.float(1) > 0.0 && size.float(2) > 0.0)
+                .map(|size| (size.float(1), size.float(2)));
+            draw_image_fill(canvas, &picture, bounds, image.int(2), size);
+        } else if let Some(ramp) = ramp {
+            paint_ramp(canvas, ramp, bounds);
+        }
         // The tint colour is laid over the image at its alpha (measured: a 50% white tint washes a
         // photo background out, across 17 Keynote decks).
         if let Some(tint) = image
@@ -2058,6 +2132,13 @@ pub fn draw_image_fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_locators_ignore_the_size_suffix() {
+        assert!(ramp_for_locator("gradient/gradient_10x7").is_some());
+        assert!(ramp_for_locator("new_template5/chipboard_hd").is_some());
+        assert!(ramp_for_locator("unknown/unknown_hd").is_none());
+    }
 
     #[test]
     fn rect_helpers_match_skiasharp() {
