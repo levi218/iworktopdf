@@ -547,6 +547,14 @@ fn lookalike_files(key: &str) -> Option<FaceFiles> {
             "tex-gyre/texgyretermes-italic.otf",
             "tex-gyre/texgyretermes-bolditalic.otf",
         ),
+        // Carlito (OFL): tyPoland's metric-compatible Calibri clone, identical advance widths.
+        "calibri" => family!(
+            "carlito",
+            "Carlito-Regular.ttf",
+            "Carlito-Bold.ttf",
+            "Carlito-Italic.ttf",
+            "Carlito-BoldItalic.ttf"
+        ),
         // Commercial Type's Graphik: Public Sans (OFL), the open grotesque nearest in proportions.
         "graphik" => PUBLIC_SANS,
         "graphik-medium" => PUBLIC_SANS_MEDIUM,
