@@ -5,6 +5,7 @@
 
 use crate::fonts;
 use crate::platform;
+use crate::styles::ctx;
 use serde_json::Value;
 use skia_safe::{Canvas, Font, FontMgr, FontStyle, Paint, Point, TextBlobBuilder, Typeface};
 use std::borrow::Cow;
@@ -285,13 +286,11 @@ pub fn layout(text: &str, font: &TaggedFont) -> Shaped {
     let size = font.font.size();
     let tracking = font.tracking * size;
     if fonts::is_exact(&font.name) && faces.iter().all(Option::is_none) {
-        // The document's own font: shape with HarfBuzz so its kerning applies. Callers place
-        // one glyph per character, so a run its ligatures merge is shaped without them.
-        let one_per_character = |shaped: &Shaped| shaped.glyphs.len() == glyphs.len();
-        if let Some(shaped) = shape_exact(&text, &font.font, true)
-            .filter(one_per_character)
-            .or_else(|| shape_exact(&text, &font.font, false).filter(one_per_character))
-        {
+        // The document's own font: shape with HarfBuzz so its kerning applies. Ligatures merge
+        // glyphs only in Pages documents that use them (measured: "fi" in Times narrows
+        // "bonafide" by 1pt, which decides where Pages breaks a justified line; Keynote's export
+        // keeps "f" and "i" apart).
+        if let Some(shaped) = shape_exact(&text, &font.font, ctx::LIGATURES.get()) {
             let count = shaped.positions.len() as f32;
             let positions = shaped
                 .positions
@@ -302,7 +301,7 @@ pub fn layout(text: &str, font: &TaggedFont) -> Shaped {
             return Shaped {
                 positions,
                 width: shaped.width + tracking * count,
-                faces,
+                faces: vec![None; shaped.glyphs.len()],
                 ..shaped
             };
         }
@@ -656,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn kerx_pairs_and_ligature_runs_are_kerned() {
+    fn kerx_pairs_are_kerned_and_ligatures_optional() {
         // Needs the installed Apple face (macOS); elsewhere a substitute is used instead.
         if !fonts::is_exact("Helvetica-Light") {
             return;
@@ -672,10 +671,15 @@ mod tests {
         assert!((unkerned - measure("Te", &font) - 0.111 * 46.0).abs() < 0.01);
         let unkerned = measure("Y", &font) + measure("o", &font);
         assert!((unkerned - measure("Yo", &font) - 0.092 * 46.0).abs() < 0.01);
-        // The "fi" ligature still leaves one glyph per character, kerned.
-        let shaped = layout("fiTe", &font);
-        assert_eq!(shaped.glyphs.len(), 4);
-        assert!((shaped.width - measure("fi", &font) - measure("Te", &font)).abs() < 0.01);
+        // Without the document's ligature setting "f" and "i" stay apart; with it they merge.
+        // Either way the run after them is kerned.
+        for (ligatures, glyphs) in [(false, 4), (true, 3)] {
+            ctx::LIGATURES.set(ligatures);
+            let shaped = layout("fiTe", &font);
+            assert_eq!(shaped.glyphs.len(), glyphs);
+            assert!((shaped.width - measure("fi", &font) - measure("Te", &font)).abs() < 0.01);
+        }
+        ctx::LIGATURES.set(false);
     }
 
     /// Big-endian bytes of 16-bit words.
