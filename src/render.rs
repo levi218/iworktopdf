@@ -132,6 +132,8 @@ pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     ctx::GROW_ROWS.set(extension != "numbers");
     ctx::KEYNOTE.set(extension == "key");
     ctx::PAGES_LAYOUT.set(extension == "pages");
+    ctx::HYPHENATION.set(false);
+    ctx::LIGATURES.set(false);
     ctx::SLIDE_WIDTH.set(0.0);
     ctx::ABOVE_BELOW.with(|rects| rects.borrow_mut().clear());
     formula::reset();
@@ -548,6 +550,18 @@ fn render_pages(styles: &Styles, pdf: &mut PdfPages) -> Result<()> {
     };
     let (top, bottom) = (root.float_or(34, 72.0), root.float_or(35, 72.0));
     ctx::FOOTNOTE_COUNTER.set(0);
+    // TP.SettingsArchive (root field 7): hyphenation (9) and ligatures (10) switches.
+    let settings = doc.body(root.reference(7));
+    ctx::HYPHENATION.set(
+        settings
+            .as_ref()
+            .is_some_and(|settings| settings.boolean(9)),
+    );
+    ctx::LIGATURES.set(
+        settings
+            .as_ref()
+            .is_some_and(|settings| settings.boolean(10)),
+    );
     let body = RichText::from_storage(styles, root.reference(4), &TextStyle::default(), 0);
     let floating = floating_drawables(doc);
     let area = Rect::new(
@@ -580,6 +594,8 @@ fn render_pages(styles: &Styles, pdf: &mut PdfPages) -> Result<()> {
         total,
         index: 0,
         previous_section: None,
+        template_section: 0,
+        page_number: 0,
         masters: section_master_drawables(doc),
         floating: &floating,
     };
@@ -706,29 +722,27 @@ struct PagesSink<'a> {
     total: i32,
     index: i32,
     previous_section: Option<u64>,
+    /// The section whose header and footer templates are in effect (sections may inherit them).
+    template_section: u64,
+    /// The number page-number fields show.
+    page_number: i32,
     masters: Vec<u64>,
     floating: &'a HashMap<i32, Vec<u64>>,
 }
 
 impl PagesSink<'_> {
-    /// The page's headers and footers: each section has its own templates, field 23 on its first
-    /// page when field 21 is set, 24 on even pages when field 22 is set, else 25 (measured: a guide
-    /// alternating its running header between even and odd pages).
-    fn headers_footers(&self, section: u64) -> HeadersFooters {
+    /// The page's headers and footers, from the templates of the section in effect: first
+    /// (TP.SectionArchive field 23) on a section's first page when its first page differs (18),
+    /// even (24) on even pages when even and odd pages differ (19), else odd (25).
+    fn headers_footers(&self, first: bool) -> HeadersFooters {
         let doc = self.styles.doc();
-        let section = if section == 0 {
-            doc.of_type(10011).first().map_or(0, |object| object.id)
-        } else {
-            section
-        };
-        let Some(body) = doc.body(section) else {
+        let Some(body) = doc.body(self.template_section) else {
             return HeadersFooters::default();
         };
-        let first = self.previous_section != Some(section);
         let even = (self.index + 1) % 2 == 0;
-        let field = if first && body.int(21) == 1 {
+        let field = if first && body.boolean(18) {
             23
-        } else if body.int(22) == 1 && even {
+        } else if body.boolean(19) && even {
             24
         } else {
             25
@@ -736,10 +750,36 @@ impl PagesSink<'_> {
         template_storages(doc, &body, field)
     }
 
+    /// Enters a page of `section` (TP.SectionArchive): a new section keeps the previous one's
+    /// header and footer templates when it inherits them (17), and restarts page numbers at
+    /// field 22 when its numbering kind (21) is 1, else continues them.
+    ///
+    /// # Returns
+    ///
+    /// Whether the page is the section's first, or `None` when the section hides its headers
+    /// and footers there (28).
+    fn enter_section(&mut self, section: u64) -> Option<bool> {
+        if self.previous_section == Some(section) {
+            self.page_number += 1;
+            return Some(false);
+        }
+        self.previous_section = Some(section);
+        let body = self.styles.doc().body(section).unwrap_or_else(Proto::empty);
+        if !body.boolean(17) || self.template_section == 0 {
+            self.template_section = section;
+        }
+        self.page_number = if body.int(21) == 1 {
+            body.int_or(22, 1)
+        } else {
+            self.page_number + 1
+        };
+        (!body.boolean(28)).then_some(true)
+    }
+
     /// Headers hang from the header margin, footers sit on the footer margin; left, centre and
     /// right parts take those alignments.
     fn draw_headers_footers(&mut self, (headers, footers): HeadersFooters) {
-        ctx::PAGE_NUMBER.set(self.index + 1);
+        ctx::PAGE_NUMBER.set(self.page_number);
         ctx::PAGE_COUNT.set(self.total);
         let geometry = self.geometry;
         let aligns = [HAlign::Left, HAlign::Center, HAlign::Right];
@@ -780,13 +820,15 @@ impl PageSink for PagesSink<'_> {
         for object in self.masters.iter().filter_map(|&id| doc.get(id)) {
             draw_object(self.styles, canvas, object);
         }
-        let headers_footers = self.headers_footers(section);
-        self.draw_headers_footers(headers_footers);
-        self.previous_section = Some(if section == 0 {
+        let section = if section == 0 {
             doc.of_type(10011).first().map_or(0, |object| object.id)
         } else {
             section
-        });
+        };
+        if let Some(first) = self.enter_section(section) {
+            let headers_footers = self.headers_footers(first);
+            self.draw_headers_footers(headers_footers);
+        }
         if let (Some(ids), Some(canvas)) = (self.floating.get(&self.index), self.pdf.canvas()) {
             for object in ids.iter().filter_map(|&id| doc.get(id)) {
                 draw_object(self.styles, canvas, object);
