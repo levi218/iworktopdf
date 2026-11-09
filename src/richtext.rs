@@ -1370,8 +1370,20 @@ fn hyphenation_points(word: &str) -> Vec<usize> {
 fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
     let mut words: Vec<Option<Vec<Piece>>> = Vec::new();
     let mut current: Vec<Piece> = Vec::new();
-    for run in &paragraph.runs {
-        let font = Rc::new(run.style.font());
+    let fonts: Vec<Rc<TaggedFont>> = paragraph
+        .runs
+        .iter()
+        .map(|run| Rc::new(run.style.font()))
+        .collect();
+    for (index, run) in paragraph.runs.iter().enumerate() {
+        let font = Rc::clone(&fonts[index]);
+        // The next run's first character, when it is set in the same face: Apple kerns across a
+        // colour change ("w" | "." in syntax-coloured code).
+        let next_run_start = paragraph
+            .runs
+            .get(index + 1)
+            .filter(|_| same_face(&font, &fonts[index + 1]))
+            .and_then(|next| next.text.chars().next());
         let piece = |text: String, width: f32| Piece {
             text,
             style: Rc::clone(&run.style),
@@ -1420,9 +1432,15 @@ fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
             let end = end.max(start + 1);
             let segment: String = characters[start..end].iter().collect();
             // A word's trailing space kerns with the next word's first letter (Helvetica Bold
-            // " A": the next word starts 1.5pt earlier at 41pt), so that pair joins its width.
-            let width = match characters.get(end) {
-                Some(&next) if characters[end - 1] == ' ' && !matches!(next, '\n' | '\t') => {
+            // " A": the next word starts 1.5pt earlier at 41pt), and a run's last character with
+            // the next same-face run's first, so that pair joins its width.
+            let next = match characters.get(end) {
+                Some(&next) if characters[end - 1] == ' ' => Some(next),
+                Some(_) => None,
+                None => next_run_start,
+            };
+            let width = match next {
+                Some(next) if !matches!(next, '\n' | '\t') => {
                     let next = next.to_string();
                     shaper::measure(&format!("{segment}{next}"), &font)
                         - shaper::measure(&next, &font)
@@ -1440,6 +1458,14 @@ fn split_words(paragraph: &Paragraph) -> Vec<Option<Vec<Piece>>> {
         words.push(Some(current));
     }
     words
+}
+
+/// Whether two runs' fonts kern with each other: the same face at the same size and tracking.
+fn same_face(left: &TaggedFont, right: &TaggedFont) -> bool {
+    left.name == right.name
+        && left.font.size() == right.font.size()
+        && left.tracking == right.tracking
+        && left.font.typeface().unique_id() == right.font.typeface().unique_id()
 }
 
 /// A pending tab: alignment, stop (from the line's indent), first piece after it, pen where it
@@ -1718,12 +1744,37 @@ impl<'a> LineBuilder<'a> {
                 .map(|(piece, _)| (*piece.style).clone())
                 .collect()
         };
+        // A glyph from a fallback face raises the line to that face's ascent and adds its leading
+        // below, but its descent is not counted (measured: a Hiragino Sans arrow adds 0.5em under
+        // a 64pt Gill Sans line and lowers a Calibri title; PingFang SC kanji leave a centred
+        // Helvetica Neue line in place).
+        let fallbacks: Vec<TextStyle> = self
+            .pieces
+            .iter()
+            .flat_map(|(piece, _)| {
+                shaper::fallback_faces(&piece.text, &piece.font)
+                    .into_iter()
+                    .map(|font_name| TextStyle {
+                        font_name,
+                        bold: false,
+                        italic: false,
+                        ..(*piece.style).clone()
+                    })
+            })
+            .collect();
         let largest = |measure: fn(&TextStyle) -> f32, styles: &[TextStyle]| {
             styles.iter().map(measure).fold(f32::MIN, f32::max)
         };
         let mut height = largest(text::line_height, &styles);
         let mut ascent = largest(text::ascent, &styles);
-        let leading = largest(text::trailing_leading, &styles);
+        let mut leading = largest(text::trailing_leading, &styles);
+        if !fallbacks.is_empty() {
+            let raised = largest(text::ascent, &fallbacks) - ascent;
+            let added = largest(text::trailing_leading, &fallbacks) - leading;
+            ascent += raised.max(0.0);
+            leading += added.max(0.0);
+            height += raised.max(0.0) + added.max(0.0);
+        }
         let single_spaced = styles
             .iter()
             .all(|style| style.line_spacing_mode == 0 && style.line_spacing == 1.0);
@@ -2514,6 +2565,35 @@ mod tests {
         let notes = [(RichText::default(), 13.0), (RichText::default(), 26.0)];
         assert_eq!(Flow::notes_height(&notes), 15.0 + 13.0 + NOTE_GAP + 26.0);
         assert_eq!(Flow::notes_height(&[]), 0.0);
+    }
+
+    #[test]
+    fn runs_in_the_same_face_kern_across_a_colour_change() {
+        // Needs the installed Apple face (macOS), whose kern table holds "Te".
+        if !crate::fonts::is_exact("Helvetica") {
+            return;
+        }
+        let style = TextStyle::simple("Helvetica", 17.0, Color::WHITE, HAlign::Left);
+        let coloured = TextStyle {
+            color: Color::RED,
+            ..style.clone()
+        };
+        let runs = vec![
+            Run {
+                text: "T".into(),
+                style: Rc::new(style.clone()),
+            },
+            Run {
+                text: "ext".into(),
+                style: Rc::new(coloured),
+            },
+        ];
+        let words = split_words(&Paragraph::new(runs, style.clone()));
+        let font = style.font();
+        let kerned = shaper::measure("Te", &font) - shaper::measure("e", &font);
+        let first = &words[0].as_ref().expect("a word")[0];
+        assert!((first.width - kerned).abs() < 1e-3);
+        assert!(first.width < shaper::measure("T", &font));
     }
 
     #[test]

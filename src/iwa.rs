@@ -588,6 +588,24 @@ impl IwaDocument {
         found.cloned()
     }
 
+    /// The resource locator of a data entry the package stores only by reference (TSP.DataInfo
+    /// field 5, e.g. "gradient/gradient_10x7" for a Keynote theme picture).
+    ///
+    /// # Arguments
+    ///
+    /// * `data_id` - A TSP.DataReference identifier
+    ///
+    /// # Returns
+    ///
+    /// The locator, or `None` when the entry has none.
+    pub fn data_locator(&self, data_id: u64) -> Option<String> {
+        self.of_type(11006)
+            .into_iter()
+            .flat_map(|object| object.body.messages(4))
+            .find(|info| info.uint(1) == data_id)?
+            .string(5)
+    }
+
     /// Data file bytes by data identifier (TSP.PackageMetadata in Metadata.iwa).
     ///
     /// # Arguments
