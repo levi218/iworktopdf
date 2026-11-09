@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>iwork2pdf</title>
+    <meta
+      name="description"
+      content="Convert Pages, Numbers and Keynote documents to PDF in your browser. Nothing is uploaded."
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.0.6/css/pico.min.css"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono&display=swap"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="container">
+      <nav>
+        <ul>
+          <li><strong class="brand">iwork2pdf</strong></li>
+        </ul>
+        <ul>
+          <li>
+            <button id="theme-toggle" class="outline secondary theme-toggle" type="button">
+              <span aria-hidden="true" class="theme-icon"></span>
+            </button>
+          </li>
+        </ul>
+      </nav>
+    </header>
+    <main class="container">
+      <hgroup>
+        <h1>iWork to PDF, on your device.</h1>
+        <p>
+          Pages, Numbers and Keynote documents are converted by WebAssembly in this tab. Your file
+          never leaves the browser.
+        </p>
+      </hgroup>
+
+      <label id="drop-zone" class="drop-zone" for="picker">
+        <span class="drop-title">Choose a document or drop it here</span>
+        <span class="drop-hint">.pages &middot; .numbers &middot; .key (single-file, iWork 2013 or later)</span>
+        <input id="picker" type="file" accept=".pages,.numbers,.key" />
+      </label>
+
+      <div class="font-controls">
+        <button id="local-fonts" class="secondary outline" type="button" hidden>
+          Use fonts installed on this device
+        </button>
+        <label class="font-files" for="font-files">
+          <span role="button" class="secondary outline">Add font files</span>
+          <input id="font-files" type="file" multiple accept=".ttf,.otf,.ttc,.otc" />
+        </label>
+        <small id="font-status" aria-live="polite"></small>
+      </div>
+
+      <p id="status" role="status" aria-live="polite"></p>
+
+      <section id="result" hidden>
+        <a id="download" role="button" href="#">Download PDF</a>
+        <iframe id="preview" title="PDF preview"></iframe>
+      </section>
+    </main>
+    <footer class="container">
+      <small>
+        Fonts: the document's own fonts are used when you allow access to the fonts installed on
+        this device (Chrome and Edge) or add the font files; anything else is set in Nimbus Sans,
+        so line breaks can differ from Apple's export. Font files stay in this tab. Pasted PDF
+        artwork is skipped.
+      </small>
+    </footer>
+    <script src="app.js"></script>
+  </body>
+</html>

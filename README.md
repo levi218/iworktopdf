@@ -22,6 +22,20 @@ in this repository; missing faces fall back to installed families) are read from
   to file. The default `pdfium` feature rasterises pasted PDF artwork; build with
   `--no-default-features` where native libraries cannot be loaded (e.g. WASM).
 - `iwork2pdf-cli/`: the `iwork2pdf` command line (convert, batch, compare).
+- `iwork2pdf-wasm/`: the WebAssembly entry point (`wasm32-unknown-emscripten`, since Skia cannot
+  link to plain WASM) and `web/`, a page that converts, previews and downloads a document entirely
+  in the browser. Text uses the device's installed fonts (Chrome, Edge) or font files the user
+  adds, else the embedded Nimbus Sans. `.github/workflows/pages.yml` publishes it to GitHub Pages
+  (Settings > Pages > Source: GitHub Actions).
+
+## Web demo
+
+```bash
+rustup target add wasm32-unknown-emscripten
+source <emsdk>/emsdk_env.sh   # Emscripten SDK
+iwork2pdf-wasm/build-web.sh   # needs iwork2pdf/fonts/open/nimbus-sans/
+python3 -m http.server -d iwork2pdf-wasm/web
+```
 
 ## Usage
 

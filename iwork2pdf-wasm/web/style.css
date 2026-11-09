@@ -1,0 +1,195 @@
+/* Paper and ink: a document converter dressed like a print shop. */
+:root {
+  --pico-font-family: "IBM Plex Sans", system-ui, sans-serif;
+  --pico-font-family-monospace: "IBM Plex Mono", ui-monospace, monospace;
+  --heading-font: "Fraunces", Georgia, serif;
+  --pico-border-radius: 0.75rem;
+}
+
+[data-theme="light"],
+:root:not([data-theme="dark"]) {
+  --pico-background-color: #f6f2ea;
+  --pico-color: #2b2723;
+  --pico-muted-color: #6f675d;
+  --pico-primary: #c2410c;
+  --pico-primary-background: #c2410c;
+  --pico-primary-border: #c2410c;
+  --pico-primary-hover: #9a3412;
+  --pico-primary-hover-background: #9a3412;
+  --pico-primary-hover-border: #9a3412;
+  --pico-primary-inverse: #fff;
+  --pico-primary-focus: rgba(194, 65, 12, 0.3);
+  --paper: #fffdf8;
+  --rule: #d9cfbf;
+}
+
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --pico-background-color: #171513;
+    --pico-color: #ece6dc;
+    --pico-muted-color: #a39a8d;
+    --pico-primary: #fb923c;
+    --pico-primary-background: #ea7a2e;
+    --pico-primary-border: #ea7a2e;
+    --pico-primary-hover: #fdba74;
+    --pico-primary-hover-background: #f59e5b;
+    --pico-primary-hover-border: #f59e5b;
+    --pico-primary-inverse: #171513;
+    --pico-primary-focus: rgba(251, 146, 60, 0.3);
+    --paper: #221f1c;
+    --rule: #3d3832;
+  }
+}
+
+[data-theme="dark"] {
+  --pico-background-color: #171513;
+  --pico-color: #ece6dc;
+  --pico-muted-color: #a39a8d;
+  --pico-primary: #fb923c;
+  --pico-primary-background: #ea7a2e;
+  --pico-primary-border: #ea7a2e;
+  --pico-primary-hover: #fdba74;
+  --pico-primary-hover-background: #f59e5b;
+  --pico-primary-hover-border: #f59e5b;
+  --pico-primary-inverse: #171513;
+  --pico-primary-focus: rgba(251, 146, 60, 0.3);
+  --paper: #221f1c;
+  --rule: #3d3832;
+}
+
+body {
+  background: var(--pico-background-color);
+}
+
+h1,
+.brand {
+  font-family: var(--heading-font);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+h1 {
+  font-size: clamp(2rem, 6vw, 3.25rem);
+  line-height: 1.05;
+}
+
+.brand {
+  font-size: 1.35rem;
+  color: var(--pico-primary);
+}
+
+.theme-toggle {
+  padding: 0.5rem;
+  line-height: 0;
+}
+
+/* A half-filled disc: light and dark in one glyph. */
+.theme-icon {
+  display: inline-block;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+.drop-zone {
+  display: grid;
+  gap: 0.35rem;
+  place-items: center;
+  padding: 2.5rem 1rem;
+  text-align: center;
+  background: var(--paper);
+  border: 2px dashed var(--rule);
+  border-radius: var(--pico-border-radius);
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.drop-zone:hover,
+.drop-zone:focus-within,
+.drop-zone.dragging {
+  border-color: var(--pico-primary);
+}
+
+.drop-zone.dragging {
+  transform: scale(1.01);
+}
+
+.drop-zone input {
+  /* The whole card is the control; keep the input reachable by keyboard and screen readers. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.drop-title {
+  font-family: var(--heading-font);
+  font-size: 1.3rem;
+}
+
+.drop-hint {
+  color: var(--pico-muted-color);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.85rem;
+}
+
+.font-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.font-controls button,
+.font-files span {
+  margin: 0;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+.font-files {
+  position: relative;
+  margin: 0;
+}
+
+/* Visually hidden; the styled span is the visible control, the input keeps keyboard focus. */
+.font-files input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.font-files:focus-within span {
+  box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-primary-focus);
+}
+
+#font-status {
+  color: var(--pico-muted-color);
+}
+
+#status {
+  min-height: 1.5rem;
+  margin-top: 1rem;
+}
+
+#status.error {
+  color: var(--pico-del-color);
+}
+
+#result iframe {
+  display: block;
+  width: 100%;
+  height: 80vh;
+  margin-top: 1rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--pico-border-radius);
+  background: var(--paper);
+}
+
+footer {
+  color: var(--pico-muted-color);
+}
