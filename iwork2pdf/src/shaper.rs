@@ -131,7 +131,7 @@ fn kerning_for(font: &TaggedFont) -> Option<&'static HashMap<String, i32>> {
     tables().kerning.get(&font.name.to_lowercase())
 }
 
-/// A bundled clone whose own widths, kerning and ligatures are the original's: Carlito for
+/// An open clone whose own widths, kerning and ligatures are the original's: Carlito for
 /// Calibri ("Postscript" and the "ti" ligature in "adoption" match Apple's export to 0.1pt, where
 /// harvested pairs without ligatures are 2pt off).
 fn own_tables(font: &TaggedFont) -> bool {
@@ -756,7 +756,7 @@ mod tests {
     #[test]
     fn calibri_takes_carlitos_ligatures_one_glyph_per_character() {
         let typeface = fonts::get(Some("Calibri"), false, false);
-        // Needs the bundled Carlito (fonts/open); elsewhere Helvetica stands in.
+        // Needs Carlito in fonts/open; elsewhere Helvetica stands in.
         if typeface.family_name() != "Carlito" {
             return;
         }

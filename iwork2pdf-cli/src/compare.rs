@@ -14,9 +14,9 @@
 //! A page passes when its visual score is below 1%. The metric is fixed: do not tune it to make files
 //! pass.
 
-use crate::drawables::raster;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use iwork2pdf::drawables::raster;
 use pdfium_render::prelude::*;
 use rayon::prelude::*;
 use skia_safe::{AlphaType, EncodedImageFormat};
@@ -222,7 +222,7 @@ fn encode_capture(capture: &PageCapture) -> Vec<u8> {
 }
 
 fn decode_capture(bytes: &[u8]) -> Option<PageCapture> {
-    use crate::bytes::le_u32;
+    use iwork2pdf::bytes::le_u32;
     let field = |index: usize| le_u32(bytes, index * 4).map(|value| value as usize);
     let (width, height, count) = (field(0)?, field(1)?, field(2)?);
     let float = |offset: usize| le_u32(bytes, offset).map(f32::from_bits);
@@ -250,7 +250,7 @@ fn decode_capture(bytes: &[u8]) -> Option<PageCapture> {
 fn capture(page: &PdfPage) -> Result<PageCapture, CompareError> {
     let chars = page_chars(page);
     let (width, height, rgba) =
-        crate::pdfium::render(page, DPI, Some(PdfColor::WHITE)).map_err(CompareError::Pdf)?;
+        iwork2pdf::pdfium::render(page, DPI, Some(PdfColor::WHITE)).map_err(CompareError::Pdf)?;
     let pixels = rgba
         .chunks_exact(4)
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
@@ -468,7 +468,7 @@ pub fn compare(
     expected: &Path,
     options: &Options,
 ) -> Result<FileScore, CompareError> {
-    let pdfium = crate::pdfium::get().ok_or(CompareError::NoPdfium)?;
+    let pdfium = iwork2pdf::pdfium::get().ok_or(CompareError::NoPdfium)?;
     let ours = pdfium.load_pdf_from_file(actual, None)?;
     let theirs = pdfium.load_pdf_from_file(expected, None)?;
     let (our_count, their_count) = (

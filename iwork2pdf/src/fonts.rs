@@ -1,6 +1,6 @@
 //! Maps the PostScript font names stored in iWork documents to typefaces. Order: supplied fonts
 //! (and, on macOS, the installed Apple faces), same-design faces installed under another name,
-//! open-licence lookalikes bundled in fonts/open (labelled substitutes), then the closest
+//! open-licence lookalikes placed in fonts/open (optional, not shipped) (labelled substitutes), then the closest
 //! installed family. What differs per platform lives in platform/.
 
 use crate::bytes::{be_u16, be_u32};
@@ -27,7 +27,7 @@ pub fn set_user_font_dir(dir: &str) {
 }
 
 /// Where fonts/apple-metrics.json and fonts/open live: IWORK2PDF_RESOURCES, next to the
-/// executable, else the C# project's copy in this repository.
+/// executable, else this crate's own fonts/.
 pub fn resource_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("IWORK2PDF_RESOURCES") {
         return PathBuf::from(dir);
@@ -36,12 +36,12 @@ pub fn resource_dir() -> PathBuf {
     let beside_executable = executable.and_then(|exe| exe.parent().map(|dir| dir.join("fonts")));
     match beside_executable {
         Some(dir) if dir.join("apple-metrics.json").exists() => dir,
-        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("../IWorkToPdf/fonts"),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts"),
     }
 }
 
 /// The Helvetica Neue stand-in (IWORK2PDF_HN): "linotype" (the licensed Helvetica Neue LT Pro
-/// cut), or an open lookalike bundled in fonts/open: "roboto", "nimbus" (URW Nimbus Sans),
+/// cut), or an open lookalike in fonts/open: "roboto", "nimbus" (URW Nimbus Sans),
 /// "inter", "public" (Public Sans); "auto" (default) is the platform's choice.
 pub fn helvetica_neue_face() -> &'static str {
     static CHOICE: OnceLock<String> = OnceLock::new();
@@ -454,7 +454,7 @@ pub fn is_unknown_family(postscript_name: &str) -> bool {
         && platform::system_family(base).is_none()
 }
 
-/// The four faces of a bundled lookalike, as paths under fonts/open.
+/// The four faces of an open lookalike, as paths under fonts/open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FaceFiles {
     regular: &'static str,
@@ -524,7 +524,7 @@ const PUBLIC_SANS_MEDIUM: FaceFiles = FaceFiles::new(
     "public-sans/PublicSans-Bold.ttf",
 );
 
-/// Open-licence faces bundled in fonts/open (licence files next to them), used as labelled
+/// Open-licence faces looked up in fonts/open (optional; absent files are skipped), used as labelled
 /// substitutes for Apple-only families when no exact copy exists. Keyed by PostScript name or
 /// family base name.
 fn lookalike_files(key: &str) -> Option<FaceFiles> {
@@ -703,7 +703,7 @@ fn helvetica_neue_lookalike(lower_name: &str) -> Option<FaceFiles> {
         .map(|(_, _, files)| *files)
 }
 
-/// The bundled lookalike face for a name, if any and if enabled.
+/// The open lookalike face for a name, if any and if enabled.
 fn open_lookalike(postscript_name: &str, bold: bool, italic: bool) -> Option<Typeface> {
     let files =
         lookalike_files(postscript_name).or_else(|| lookalike_files(base_name(postscript_name)))?;

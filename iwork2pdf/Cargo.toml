@@ -1,0 +1,32 @@
+[package]
+name = "iwork2pdf"
+description = "Converts Apple iWork documents (.numbers, .key, .pages) to PDF: the UI-free logic layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["pdfium"]
+# Rasterise pasted PDF artwork with PDFium (dynamically loaded at run time); without it such
+# artwork is skipped. Off for targets that cannot load native libraries (WASM).
+pdfium = ["dep:pdfium-render"]
+
+[dependencies]
+# Dates in cell formats (2001 epoch, ISO weeks).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# TIFF Deflate strips.
+flate2.workspace = true
+# Knuth-Liang hyphenation (US English patterns) for Pages documents that hyphenate.
+hyphenation = { version = "0.8", features = ["embed_en-us"] }
+# Diagnostics; the front end chooses the logger.
+log = "0.4"
+pdfium-render = { workspace = true, optional = true }
+rayon.workspace = true
+# HarfBuzz shaping of the document's exact fonts.
+rustybuzz = "0.20"
+# fonts/apple-metrics.json.
+serde_json = "1.0"
+skia-safe.workspace = true
+thiserror.workspace = true
+# Single-file documents and Index.zip.
+zip = { version = "2", default-features = false, features = ["deflate"] }

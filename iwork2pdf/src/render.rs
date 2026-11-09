@@ -1,5 +1,5 @@
-//! Document conversion: detects the application from the extension, renders its pages and writes
-//! the PDF.
+//! Document conversion: renders a decoded document's pages as a PDF in memory (`render`), or
+//! file to file (`convert`).
 
 use crate::drawables::{
     self, geometry, is_zero, paint_fill, rotated_bounds, union, wrap_in, wrap_of, Item, ShapeItem,
@@ -60,20 +60,12 @@ impl PdfPages {
         }
     }
 
-    /// Writes every page to a PDF file.
-    ///
-    /// # Arguments
-    ///
-    /// * `output` - The PDF's path
+    /// Ends the current page and encodes every page as a PDF.
     ///
     /// # Returns
     ///
-    /// The number of pages written.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Io` when the file cannot be written.
-    pub fn write(mut self, output: &FilePath) -> Result<usize> {
+    /// The PDF's bytes and its page count.
+    pub fn finish(mut self) -> (Vec<u8>, usize) {
         self.end();
         let mut bytes: Vec<u8> = Vec::new();
         // An encoding quality of 101 keeps images lossless (SkiaSharp's default; 0 would write
@@ -91,12 +83,38 @@ impl PdfPages {
             document = page.end_page();
         }
         document.close();
-        std::fs::write(output, bytes).map_err(Error::io(output))?;
-        Ok(self.pages.len())
+        (bytes, self.pages.len())
     }
 }
 
-/// Converts an iWork document to PDF.
+/// The iWork application a document belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentKind {
+    /// A .numbers spreadsheet.
+    Numbers,
+    /// A .key presentation.
+    Keynote,
+    /// A .pages document.
+    Pages,
+}
+
+impl DocumentKind {
+    /// The kind for a file extension (without the dot, any case).
+    ///
+    /// # Returns
+    ///
+    /// `None` for anything but numbers, key and pages.
+    pub fn from_extension(extension: &str) -> Option<DocumentKind> {
+        match extension.to_ascii_lowercase().as_str() {
+            "numbers" => Some(DocumentKind::Numbers),
+            "key" => Some(DocumentKind::Keynote),
+            "pages" => Some(DocumentKind::Pages),
+            _ => None,
+        }
+    }
+}
+
+/// Converts an iWork document file or package to a PDF file.
 ///
 /// # Arguments
 ///
@@ -109,16 +127,36 @@ impl PdfPages {
 ///
 /// # Errors
 ///
-/// Returns `Error::Unsupported` for other extensions and the open/write errors of the document.
+/// Returns `Error::Unsupported` for other extensions, the open errors of the document and
+/// `Error::Io` when the PDF cannot be written.
 pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     let extension = document
         .extension()
-        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .map(|extension| extension.to_string_lossy())
         .unwrap_or_default();
-    if !matches!(extension.as_str(), "numbers" | "key" | "pages") {
-        return Err(Error::Unsupported(format!(".{extension}")));
-    }
-    let doc = Rc::new(IwaDocument::open(document)?);
+    let kind = DocumentKind::from_extension(&extension)
+        .ok_or_else(|| Error::Unsupported(format!(".{extension}")))?;
+    let (bytes, pages) = render(IwaDocument::open(document)?, kind)?;
+    std::fs::write(output, bytes).map_err(Error::io(output))?;
+    Ok(pages)
+}
+
+/// Renders a decoded document as a PDF in memory (no file system access besides font lookup).
+///
+/// # Arguments
+///
+/// * `document` - The decoded document, e.g. from `IwaDocument::from_bytes`
+/// * `kind` - Which application's layout rules apply
+///
+/// # Returns
+///
+/// The PDF's bytes and its page count.
+///
+/// # Errors
+///
+/// Returns `Error::Missing` when a required archive object is absent.
+pub fn render(document: IwaDocument, kind: DocumentKind) -> Result<(Vec<u8>, usize)> {
+    let doc = Rc::new(document);
     // TSK.DocumentArchive.locale_identifier (4), under TSA.DocumentArchive (field 1) in the app's
     // document archive (Numbers field 8, Keynote 3, Pages 1).
     let root = doc.body(1);
@@ -129,9 +167,9 @@ pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     });
     // Per-document layout state (thread-local, so batch conversions reset it).
     ctx::LOCALE.with(|cell| *cell.borrow_mut() = locale);
-    ctx::GROW_ROWS.set(extension != "numbers");
-    ctx::KEYNOTE.set(extension == "key");
-    ctx::PAGES_LAYOUT.set(extension == "pages");
+    ctx::GROW_ROWS.set(kind != DocumentKind::Numbers);
+    ctx::KEYNOTE.set(kind == DocumentKind::Keynote);
+    ctx::PAGES_LAYOUT.set(kind == DocumentKind::Pages);
     ctx::HYPHENATION.set(false);
     ctx::LIGATURES.set(false);
     ctx::SLIDE_WIDTH.set(0.0);
@@ -139,12 +177,12 @@ pub fn convert(document: &FilePath, output: &FilePath) -> Result<usize> {
     formula::reset();
     let styles = Styles::new(Rc::clone(&doc));
     let mut pdf = PdfPages::default();
-    match extension.as_str() {
-        "numbers" => render_numbers(&styles, &mut pdf)?,
-        "key" => render_keynote(&styles, &mut pdf)?,
-        _ => render_pages(&styles, &mut pdf)?,
+    match kind {
+        DocumentKind::Numbers => render_numbers(&styles, &mut pdf)?,
+        DocumentKind::Keynote => render_keynote(&styles, &mut pdf)?,
+        DocumentKind::Pages => render_pages(&styles, &mut pdf)?,
     }
-    pdf.write(output)
+    Ok(pdf.finish())
 }
 
 // ----------------------------------------------------------------- Numbers
@@ -863,5 +901,22 @@ mod tests {
     fn unsupported_extension() {
         let result = convert(FilePath::new("notes.txt"), FilePath::new("notes.pdf"));
         assert!(matches!(result, Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn document_kind_from_extension() {
+        assert_eq!(
+            DocumentKind::from_extension("KEY"),
+            Some(DocumentKind::Keynote)
+        );
+        assert_eq!(DocumentKind::from_extension("docx"), None);
+    }
+
+    #[test]
+    fn from_bytes_rejects_non_zip() {
+        assert!(matches!(
+            IwaDocument::from_bytes(b"not a zip"),
+            Err(Error::Zip(_))
+        ));
     }
 }
