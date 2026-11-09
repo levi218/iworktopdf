@@ -1,14 +1,17 @@
 //! iwork2pdf: convert Apple iWork documents (.numbers, .key, .pages) to PDF, offline.
 
+mod compare;
+
 use anyhow::{bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use iwork2pdf::compare::{self, Cache, FileScore, Options};
 use iwork2pdf::{fonts, render};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use compare::{Cache, FileScore, Options};
 
 const USAGE: &str = "\
 iwork2pdf - convert Apple iWork documents (.numbers, .key, .pages) to PDF, offline.

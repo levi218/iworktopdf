@@ -205,8 +205,9 @@ fn linear_sampling() -> SamplingOptions {
 
 // ------------------------------------------------------------------ images
 
-/// Decodes a picture: TIFF (built-in decoder), PDF (rasterised by PDFium at up to 3x on a
-/// transparent background, the long side capped at 3000px), or anything Skia reads.
+/// Decodes a picture: TIFF (built-in decoder), PDF (with the `pdfium` feature: rasterised by
+/// PDFium at up to 3x on a transparent background, the long side capped at 3000px), or anything
+/// Skia reads.
 ///
 /// # Arguments
 ///
@@ -225,6 +226,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         };
         return raster(decoded.width, decoded.height, &decoded.rgba, alpha);
     }
+    // `#[cfg]` compiles the block only when the feature is on (like a build-time `if`).
+    #[cfg(feature = "pdfium")]
     if bytes.starts_with(b"%PDF") {
         let pdfium = crate::pdfium::get()?;
         let document = pdfium.load_pdf_from_byte_slice(bytes, None).ok()?;

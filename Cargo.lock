@@ -571,12 +571,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "iwork2pdf"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
- "env_logger",
  "flate2",
  "hyphenation",
- "indicatif",
  "log",
  "pdfium-render",
  "rayon",
@@ -585,6 +582,22 @@ dependencies = [
  "skia-safe",
  "thiserror",
  "zip",
+]
+
+[[package]]
+name = "iwork2pdf-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "flate2",
+ "indicatif",
+ "iwork2pdf",
+ "log",
+ "pdfium-render",
+ "rayon",
+ "skia-safe",
+ "thiserror",
 ]
 
 [[package]]

@@ -11,8 +11,17 @@ cargo build --release
 ```
 
 PDFium is looked up in `IWORK2PDF_PDFIUM`, next to the executable, the working directory, then
-the system library path. Font metrics are read from `../IWorkToPdf/fonts` (or
-`IWORK2PDF_RESOURCES`, or `fonts/` next to the executable).
+the system library path. Font metrics (`apple-metrics.json`) and the optional open lookalike fonts (`open/<family>/`, not
+in this repository; missing faces fall back to installed families) are read from
+`IWORK2PDF_RESOURCES`, `fonts/` next to the executable, else `iwork2pdf/fonts`.
+
+## Layout
+
+- `iwork2pdf/`: the logic layer, a library with no user interface. `render::render` turns an
+  `iwa::IwaDocument::from_bytes` document into PDF bytes in memory; `render::convert` does it file
+  to file. The default `pdfium` feature rasterises pasted PDF artwork; build with
+  `--no-default-features` where native libraries cannot be loaded (e.g. WASM).
+- `iwork2pdf-cli/`: the `iwork2pdf` command line (convert, batch, compare).
 
 ## Usage
 
@@ -20,14 +29,13 @@ the system library path. Font metrics are read from `../IWorkToPdf/fonts` (or
 iwork2pdf convert doc.numbers -o doc.pdf
 iwork2pdf batch <src-dir> <out-dir> [--set list.txt]
 iwork2pdf compare <actual-dir> <expected-dir> [--set list.txt] [--cache dir] [--diff-dir dir]
-./acceptance.sh             # full acceptance run: wipes outputs, converts, compares, writes acceptance-report/REPORT.md
 ```
 
 `--fonts <dir>` (or `IWORK2PDF_FONTS`) adds licensed font files matched by PostScript name.
 
 ## Platform split
 
-Everything platform-specific lives in `src/platform/`:
+Everything platform-specific lives in `iwork2pdf/src/platform/`:
 
 - `macos.rs`: installed Apple fonts are used as the document's exact fonts.
 - `windows.rs`: Apple families map to installed lookalikes, positioned with Apple's harvested
@@ -47,3 +55,7 @@ Everything platform-specific lives in `src/platform/`:
 A page passes when its visual score is below 1%. `IWORK2PDF_PAGES=1` lists every page's scores.
 `--diff-dir` writes colour PNGs per failing page:
 expected | actual | faded expected with differences in magenta.
+
+## License
+
+GPL-3.0-or-later (see `LICENSE`).

@@ -1,5 +1,5 @@
 //! iWork 2013+ containers: Snappy-framed IWA archives of protobuf messages, read without a schema
-//! by field number (field numbers come from the IWA .proto definitions in IWorkToPdf/schema/).
+//! by field number (field numbers come from the IWA .proto definitions Apple ships in the iWork apps).
 
 use crate::bytes::{le_u32, le_u64};
 use crate::error::{Error, Result};
@@ -384,7 +384,7 @@ fn snappy_raw(block: &[u8], output: &mut Vec<u8>) {
 pub struct IwaObject {
     /// The object identifier other objects reference.
     pub id: u64,
-    /// The message type (see the TSPRegistry maps in IWorkToPdf/schema/*.json).
+    /// The message type (Apple's TSPRegistry type numbers).
     pub typ: u32,
     /// The message.
     pub body: Proto,
@@ -531,16 +531,36 @@ impl IwaDocument {
     /// Returns `Error::Io` or `Error::Zip` when the files cannot be read, and `Error::NotIwa` when
     /// the package holds no IWA archives.
     pub fn open(path: &Path) -> Result<IwaDocument> {
-        let mut files = HashMap::new();
-        if path.is_dir() {
-            read_dir_files(path, path, &mut files)?;
-        } else {
-            read_zip(
-                &std::fs::read(path).map_err(Error::io(path))?,
-                true,
-                &mut files,
-            )?;
+        if !path.is_dir() {
+            return IwaDocument::from_bytes(&std::fs::read(path).map_err(Error::io(path))?);
         }
+        let mut files = HashMap::new();
+        read_dir_files(path, path, &mut files)?;
+        IwaDocument::from_files(files)
+    }
+
+    /// Opens a single-file document (a zip) from memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The .numbers, .key or .pages file's contents
+    ///
+    /// # Returns
+    ///
+    /// The document with every archive object decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Zip` when the bytes are not a readable zip and `Error::NotIwa` when it holds
+    /// no IWA archives.
+    pub fn from_bytes(bytes: &[u8]) -> Result<IwaDocument> {
+        let mut files = HashMap::new();
+        read_zip(bytes, true, &mut files)?;
+        IwaDocument::from_files(files)
+    }
+
+    /// Decodes the archives of a package's files.
+    fn from_files(files: Files) -> Result<IwaDocument> {
         let objects = load_archives(&files)?;
         Ok(IwaDocument {
             objects,
