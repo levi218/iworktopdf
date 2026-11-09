@@ -9,9 +9,9 @@ use crate::styles::{self, ctx, Stroke, Styles};
 use crate::table::TableItem;
 use crate::text::{HAlign, TextStyle};
 use skia_safe::{
-    images, path_utils, AlphaType, Canvas, Color, ColorType, Data, FilterMode, Image, ImageInfo,
-    Matrix, MipmapMode, Paint, PaintCap, PaintStyle, Path, PathFillType, Point, Rect,
-    SamplingOptions, Shader, TileMode,
+    images, path_utils, AlphaType, BlendMode, Canvas, Color, ColorType, Data, FilterMode, Image,
+    ImageInfo, Matrix, MipmapMode, Paint, PaintCap, PaintStyle, Path, PathFillType, PathOp, Point,
+    Rect, SamplingOptions, Shader, TileMode,
 };
 use std::cell::OnceCell;
 use std::rc::Rc;
@@ -957,6 +957,16 @@ impl ShapeItem {
         if opacity < 1.0 {
             layer_with_opacity(canvas, opacity);
         }
+        self.draw_content(canvas);
+        self.draw_reflection(canvas);
+        if opacity < 1.0 {
+            canvas.restore();
+        }
+        canvas.restore();
+    }
+
+    /// The shape itself (shadow, fill, stroke, text) in its own unrotated frame.
+    fn draw_content(&self, canvas: &Canvas) {
         canvas.save();
         if self.flip_x || self.flip_y {
             canvas.translate((
@@ -992,10 +1002,69 @@ impl ShapeItem {
                 HAlign::Left,
             );
         }
-        if opacity < 1.0 {
-            canvas.restore();
+    }
+
+    /// The shape's reflection (shape style 5, TSD.ReflectionArchive opacity 1): the shape mirrored
+    /// below its bottom edge, fading from that opacity to nothing over 0.4 of its height as
+    /// (1 - t)^1.75 (measured: a 200pt shape at 0.5 fades out 81pt below it).
+    fn draw_reflection(&self, canvas: &Canvas) {
+        // An empty archive means no reflection.
+        let Some(reflection) = self
+            .styles
+            .shape_prop(self.style, 5)
+            .and_then(|props| props.message_opt(5))
+            .filter(|reflection| !reflection.is_empty())
+        else {
+            return;
+        };
+        let strength = reflection.float_or(1, 0.5);
+        if strength <= 0.0 || self.height <= 0.0 {
+            return;
         }
-        canvas.restore();
+        // Rendered to an image as Apple does: PDF has no destination-in blending.
+        const SCALE: f32 = 2.0;
+        let fade = Rect::from_xywh(0.0, self.height, self.width, self.height * 0.4);
+        let size = (
+            (fade.width() * SCALE).ceil() as i32,
+            (fade.height() * SCALE).ceil() as i32,
+        );
+        let Some(mut surface) = skia_safe::surfaces::raster_n32_premul(size) else {
+            return;
+        };
+        let raster = surface.canvas();
+        raster.scale((SCALE, SCALE));
+        raster.save();
+        raster.translate((0.0, self.height));
+        raster.scale((1.0, -1.0));
+        self.draw_content(raster);
+        raster.restore();
+        const STEPS: usize = 8;
+        let (colors, positions): (Vec<Color>, Vec<f32>) = (0..=STEPS)
+            .map(|step| {
+                let t = step as f32 / STEPS as f32;
+                let alpha = strength * (1.0 - t).powf(1.75);
+                (Color::BLACK.with_a((alpha * 255.0).round() as u8), t)
+            })
+            .unzip();
+        let mut mask = Paint::default();
+        mask.set_blend_mode(BlendMode::DstIn);
+        mask.set_shader(Shader::linear_gradient(
+            (Point::new(0.0, 0.0), Point::new(0.0, fade.height())),
+            colors.as_slice(),
+            positions.as_slice(),
+            TileMode::Clamp,
+            None,
+            None,
+        ));
+        raster.draw_rect(Rect::from_wh(fade.width(), fade.height()), &mask);
+        let image = surface.image_snapshot();
+        canvas.draw_image_rect_with_sampling_options(
+            &image,
+            None,
+            fade,
+            linear_sampling(),
+            &Paint::default(),
+        );
     }
 
     /// A zero-size Keynote text box paints its fill and stroke where its text is laid out: hugging
@@ -1460,17 +1529,108 @@ pub fn build_path(source: &Proto, width: f32, height: f32) -> Path {
     if let Some(editable) = source.message_opt(8) {
         return editable_path(&editable, width, height);
     }
+    if let Some(callout) = source.message_opt(6) {
+        return callout_path(&callout, width, height);
+    }
     let mut path = Path::new();
-    match source.message_opt(6) {
-        // A callout: its rounded box (corner radius 4).
-        Some(callout) => path.add_round_rect(
-            Rect::from_wh(width, height),
-            (callout.float(4), callout.float(4)),
-            None,
-        ),
-        None => path.add_rect(Rect::from_wh(width, height), None),
-    };
+    path.add_rect(Rect::from_wh(width, height), None);
     path
+}
+
+/// A callout: its box (corner radius 4; past half the short side an ellipse) joined to a tail
+/// (tip 2, in natural units of 1, its base 2 x field 3 wide). The base is centred on the nearest
+/// edge level with the tip, or with field 5 (tail at centre) lies between two lines parallel to
+/// the centre-to-tip direction (measured: Keynote's rectangle and oval callouts).
+fn callout_path(callout: &Proto, width: f32, height: f32) -> Path {
+    let frame = Rect::from_wh(width, height);
+    let radius = callout.float(4);
+    let oval = radius > width.min(height) / 2.0;
+    let mut body = Path::new();
+    if oval {
+        body.add_oval(frame, None);
+    } else {
+        body.add_round_rect(frame, (radius, radius), None);
+    }
+    let (scale_x, scale_y) = natural_scale(&callout.message(1), width, height);
+    let tip_point = callout.message(2);
+    let tip = Point::new(tip_point.float(1) * scale_x, tip_point.float(2) * scale_y);
+    let half_base = callout.float(3);
+    let base = if callout.boolean(5) {
+        centered_tail_base(frame, oval, tip, half_base)
+    } else {
+        box_tail_base(frame, tip, half_base)
+    };
+    let Some((first, second)) = base else {
+        return body;
+    };
+    body.op(&polygon([tip, first, second]), PathOp::Union)
+        .unwrap_or(body)
+}
+
+/// The tail base on a box's edge nearest a tip outside it, level with the tip.
+fn box_tail_base(frame: Rect, tip: Point, half: f32) -> Option<(Point, Point)> {
+    let along_y = |x: f32| {
+        let y = tip.y.clamp(frame.top + half, frame.bottom - half);
+        (Point::new(x, y - half), Point::new(x, y + half))
+    };
+    let along_x = |y: f32| {
+        let x = tip.x.clamp(frame.left + half, frame.right - half);
+        (Point::new(x - half, y), Point::new(x + half, y))
+    };
+    if tip.x < frame.left {
+        Some(along_y(frame.left))
+    } else if tip.x > frame.right {
+        Some(along_y(frame.right))
+    } else if tip.y < frame.top {
+        Some(along_x(frame.top))
+    } else if tip.y > frame.bottom {
+        Some(along_x(frame.bottom))
+    } else {
+        None
+    }
+}
+
+/// The tail base where the two lines `half` either side of the centre-to-tip line, running
+/// towards the tip, leave the body (an ellipse, or the box ignoring its rounded corners).
+fn centered_tail_base(frame: Rect, oval: bool, tip: Point, half: f32) -> Option<(Point, Point)> {
+    let center = frame.center();
+    let (radius_x, radius_y) = (frame.width() / 2.0, frame.height() / 2.0);
+    let to_tip = tip - center;
+    let length = to_tip.length();
+    if length <= 0.0 || radius_x <= 0.0 || radius_y <= 0.0 {
+        return None;
+    }
+    let direction = Point::new(to_tip.x / length, to_tip.y / length);
+    let normal = Point::new(-direction.y, direction.x);
+    // The distance along `direction` from `start` (relative to the centre) to the body's edge.
+    let exit_distance = |start: Point| -> Option<f32> {
+        if oval {
+            // Solve |(start + t * direction) / radii| = 1 for the larger t.
+            let (dx, dy) = (direction.x / radius_x, direction.y / radius_y);
+            let (sx, sy) = (start.x / radius_x, start.y / radius_y);
+            let a = dx * dx + dy * dy;
+            let b = 2.0 * (dx * sx + dy * sy);
+            let discriminant = b * b - 4.0 * a * (sx * sx + sy * sy - 1.0);
+            (discriminant >= 0.0).then(|| (-b + discriminant.sqrt()) / (2.0 * a))
+        } else {
+            // The nearest of the box sides ahead of the line.
+            let side = |start: f32, step: f32, radius: f32| {
+                (step.abs() > f32::EPSILON).then(|| (radius.copysign(step) - start) / step)
+            };
+            [
+                side(start.x, direction.x, radius_x),
+                side(start.y, direction.y, radius_y),
+            ]
+            .into_iter()
+            .flatten()
+            .reduce(f32::min)
+        }
+    };
+    let exit = |offset: f32| {
+        let start = Point::new(normal.x * offset, normal.y * offset);
+        exit_distance(start).map(|t| center + start + Point::new(direction.x * t, direction.y * t))
+    };
+    Some((exit(half)?, exit(-half)?))
 }
 
 fn natural_scale(natural: &Proto, width: f32, height: f32) -> (f32, f32) {
@@ -1597,37 +1757,39 @@ fn point_path(source: &Proto, width: f32, height: f32) -> Path {
     let point = source.message(2);
     let (point_x, point_y) = (point.float(1), point.float(2));
     let (scale_x, scale_y) = natural_scale(&source.message(3), width, height);
-    // point.y: shaft thickness as a fraction of the height (measured: 0.34), else in natural units.
-    let half_shaft = (if point_y <= 1.0 {
+    // point.y: the shaft's top edge as a fraction of the height (else in natural units), the
+    // shaft symmetric about the middle; point.x: the head's length from its tip (measured:
+    // arrows with point (64, 0.34) and (68.88, 0.25)).
+    let shaft_top = if point_y <= 1.0 {
         point_y * height
     } else {
         point_y * scale_y
-    }) / 2.0;
-    let (shaft_top, shaft_bottom) = (height / 2.0 - half_shaft, height / 2.0 + half_shaft);
+    };
+    let shaft_bottom = height - shaft_top;
     let head = point_x * scale_x;
     let mid = height / 2.0;
     let points: Vec<(f32, f32)> = match source.int(1) {
-        1 => vec![
-            (0.0, shaft_top),
-            (head, shaft_top),
-            (head, 0.0),
-            (width, mid),
-            (head, height),
-            (head, shaft_bottom),
-            (0.0, shaft_bottom),
-        ],
-        0 => {
+        1 => {
             let head_x = width - head;
             vec![
-                (width, shaft_top),
+                (0.0, shaft_top),
                 (head_x, shaft_top),
                 (head_x, 0.0),
-                (0.0, mid),
+                (width, mid),
                 (head_x, height),
                 (head_x, shaft_bottom),
-                (width, shaft_bottom),
+                (0.0, shaft_bottom),
             ]
         }
+        0 => vec![
+            (width, shaft_top),
+            (head, shaft_top),
+            (head, 0.0),
+            (0.0, mid),
+            (head, height),
+            (head, shaft_bottom),
+            (width, shaft_bottom),
+        ],
         10 => {
             let far = width - head;
             vec![
@@ -2077,6 +2239,26 @@ mod tests {
             rotated_bounds(1.0, 2.0, (3.0, 4.0), 0.0),
             Rect::from_xywh(1.0, 2.0, 3.0, 4.0)
         );
+    }
+
+    #[test]
+    fn callout_tail_bases() {
+        // Keynote's rectangle callout: tip left of the box, base on the left edge level with it.
+        let frame = Rect::from_wh(320.0, 220.0);
+        let (first, second) = box_tail_base(frame, Point::new(-20.0, 50.0), 10.0).expect("base");
+        assert_eq!(
+            (first, second),
+            (Point::new(0.0, 40.0), Point::new(0.0, 60.0))
+        );
+        assert!(box_tail_base(frame, Point::new(10.0, 10.0), 10.0).is_none());
+        // Its oval callout: both base points on the ellipse, 16pt apart across the tip line.
+        let tip = Point::new(0.8, 232.8);
+        let (first, second) = centered_tail_base(frame, true, tip, 8.0).expect("base");
+        let on_ellipse = |point: Point| {
+            ((point.x - 160.0) / 160.0).powi(2) + ((point.y - 110.0) / 110.0).powi(2)
+        };
+        assert!((on_ellipse(first) - 1.0).abs() < 1e-3 && (on_ellipse(second) - 1.0).abs() < 1e-3);
+        assert!(((first - second).length() - 16.0).abs() < 1.5);
     }
 
     #[test]

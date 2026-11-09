@@ -20,6 +20,7 @@ the system library path. Font metrics are read from `../IWorkToPdf/fonts` (or
 iwork2pdf convert doc.numbers -o doc.pdf
 iwork2pdf batch <src-dir> <out-dir> [--set list.txt]
 iwork2pdf compare <actual-dir> <expected-dir> [--set list.txt] [--cache dir] [--diff-dir dir]
+./acceptance.sh             # full acceptance run: wipes outputs, converts, compares, writes acceptance-report/REPORT.md
 ```
 
 `--fonts <dir>` (or `IWORK2PDF_FONTS`) adds licensed font files matched by PostScript name.
@@ -44,5 +45,5 @@ Everything platform-specific lives in `src/platform/`:
   drawn as pixels or paths (e.g. a rasterised pasted PDF) is unmatched here even when it looks right.
 
 A page passes when its visual score is below 1%. `IWORK2PDF_PAGES=1` lists every page's scores.
-`--diff-dir` writes colour PNGs per differing page:
+`--diff-dir` writes colour PNGs per failing page:
 expected | actual | faded expected with differences in magenta.

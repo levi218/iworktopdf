@@ -332,13 +332,15 @@ fn score_line(name: &str, actual: &Path, expected: &Path, options: &Options) -> 
                 let pages: Vec<String> = score
                     .pages
                     .iter()
-                    .map(|page| {
-                        format!(
+                    // A page that could not be compared (size mismatch, render error) is "n/a".
+                    .map(|page| match page.error {
+                        Some(_) => format!("{} n/a", page.page),
+                        None => format!(
                             "{} {:.2}/{:.2}",
                             page.page,
                             page.visual * 100.0,
                             page.text * 100.0
-                        )
+                        ),
                     })
                     .collect();
                 let separator = if detail.is_empty() { "" } else { "; " };
