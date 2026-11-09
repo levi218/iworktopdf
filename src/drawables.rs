@@ -641,6 +641,21 @@ impl ShapeItem {
             {
                 top -= height / 2.0;
             }
+        } else if storage != 0
+            && flags.has(3)
+            && (flags.int(3) & 2) == 0
+            && flags.message(2).float(2) > 0.0
+        {
+            // A middle-aligned box whose height is not valid (geometry flags without bit 1) is
+            // centred on the stored y, fill and text alike (measured: a 10-line Keynote code box
+            // 383pt down spans 170 to 596; a 148pt caption box at y 669.5 fills 595.5 to 743.5).
+            let default_align = if !bare && body.boolean(6) { 0 } else { 1 };
+            let vertical_align = styles
+                .text_frame_prop(style, 2)
+                .map_or(default_align, |props| props.int(2));
+            if vertical_align == 1 {
+                top -= height / 2.0;
+            }
         }
         ShapeItem {
             styles: styles.clone(),
@@ -667,7 +682,24 @@ impl ShapeItem {
     ///
     /// * `bottom` - The lowest y the shape may reach
     pub fn keep_above(&mut self, bottom: f32) {
-        self.origin.y = self.origin.y.min(bottom - self.height);
+        // Text that grows upward from the stored y already ends there.
+        if !self.text_grows_upward() {
+            self.origin.y = self.origin.y.min(bottom - self.height);
+        }
+    }
+
+    /// Whether the text sits above the stored position instead of in the box: a bottom-aligned
+    /// box whose geometry flags lack bit 1 (height not valid) grows upward from y (measured: a
+    /// Keynote slide header sits above y; a slide number stored 19pt past the slide bottom ends
+    /// 10pt above it).
+    fn text_grows_upward(&self) -> bool {
+        let default_align = if self.is_text_box { 0 } else { 1 };
+        let vertical_align = self
+            .styles
+            .text_frame_prop(self.style, 2)
+            .map_or(default_align, |props| props.int(2));
+        let flags = self.shape.message(1).message(1);
+        vertical_align == 2 && flags.has(3) && (flags.int(3) & 2) == 0
     }
 
     /// Re-routes a connection line between the current frames of the shapes it joins
@@ -1190,17 +1222,23 @@ impl ShapeItem {
         if self.auto_width && width <= 0.01 && height <= 0.01 {
             return Some(self.zero_size_layout(text, insets, vertical_align));
         }
+        let grows_upward = self.text_grows_upward();
         if self.auto_width {
             let shift = match align {
                 HAlign::Center => width / 2.0,
                 HAlign::Right => width,
                 _ => 0.0,
             };
+            let (top, bottom) = if grows_upward {
+                (insets.top - height, -insets.bottom)
+            } else {
+                (insets.top, height - insets.bottom)
+            };
             let rect = Rect::new(
                 insets.left - shift,
-                insets.top,
+                top,
                 width - insets.right - shift,
-                height - insets.bottom,
+                bottom,
             );
             return Some(TextLayout {
                 text,
@@ -1215,24 +1253,12 @@ impl ShapeItem {
             height - insets.bottom,
         );
         let flags = self.shape.message(1).message(1);
-        let height_invalid = flags.has(3) && (flags.int(3) & 2) == 0;
-        if vertical_align == 2 && height_invalid {
-            // Geometry flags without bit 1 (height not valid) on a bottom-aligned box: the text grows
-            // upward from the stored position (measured: a Keynote slide header sits above y).
+        if grows_upward {
             rect = Rect::new(
                 insets.left,
                 insets.top - height,
                 width - insets.right,
                 -insets.bottom,
-            );
-        } else if vertical_align == 1 && height_invalid && flags.message(2).float(2) > 0.0 {
-            // Middle-aligned, the text centres on the stored y (measured: a 10-line Keynote code box
-            // 383pt down spans 170 to 596). A zero stored height keeps the text hanging from y.
-            rect = Rect::new(
-                insets.left,
-                insets.top - height / 2.0,
-                width - insets.right,
-                height / 2.0 - insets.bottom,
             );
         }
         // Shrink text to fit (shape style field 1): font sizes step down by 1% until the text fits
@@ -1993,11 +2019,76 @@ fn fill_image_id(image: &Proto) -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether an ImageFillArchive's picture is in the package and decodes.
+/// A theme picture's colour ramp: `(position, [red, green, blue])` stops from top to bottom.
+type ThemeRamp = &'static [(f32, [u8; 3])];
+
+/// Keynote theme pictures a package references only by locator (the image lives inside
+/// Keynote.app), keyed by locator without its size suffix ("gradient/gradient_10x7" ->
+/// "gradient/gradient"). Each is a top-to-bottom ramp measured from Apple's exports.
+const THEME_PICTURES: &[(&str, ThemeRamp)] = &[
+    // A 10x7 picture stretched over the slide: near black down to slate.
+    (
+        "gradient/gradient",
+        &[
+            (0.0, [3, 3, 3]),
+            (0.1667, [4, 3, 6]),
+            (0.3333, [6, 5, 33]),
+            (0.4167, [18, 18, 49]),
+            (0.5833, [54, 54, 82]),
+            (0.75, [85, 85, 109]),
+            (1.0, [115, 113, 134]),
+        ],
+    ),
+    // Chipboard texture: its grain stays within the comparison tolerance of the average.
+    (
+        "new_template5/chipboard",
+        &[(0.0, [184, 172, 158]), (1.0, [175, 163, 148])],
+    ),
+];
+
+/// Looks up a theme picture locator ("gradient/gradient_10x7") in `THEME_PICTURES`.
+fn ramp_for_locator(locator: &str) -> Option<ThemeRamp> {
+    let stem = locator.rsplit_once('_').map_or(locator, |(stem, _)| stem);
+    THEME_PICTURES
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|&(_, ramp)| ramp)
+}
+
+/// The built-in ramp for an ImageFillArchive whose picture is a known Keynote theme resource.
+fn theme_ramp(doc: &IwaDocument, image: &Proto) -> Option<ThemeRamp> {
+    ramp_for_locator(&doc.data_locator(fill_image_id(image))?)
+}
+
+/// Whether `paint_fill` can paint an ImageFillArchive: its picture is in the package and
+/// decodes, or it is a known Keynote theme picture.
 pub fn image_available(doc: &IwaDocument, image: &Proto) -> bool {
     doc.read_data(fill_image_id(image))
         .and_then(|bytes| decode(&bytes))
         .is_some()
+        || theme_ramp(doc, image).is_some()
+}
+
+/// Paints a theme ramp top to bottom over `area`.
+fn paint_ramp(canvas: &Canvas, ramp: ThemeRamp, area: Rect) {
+    let colors: Vec<Color> = ramp
+        .iter()
+        .map(|&(_, [red, green, blue])| Color::from_rgb(red, green, blue))
+        .collect();
+    let positions: Vec<f32> = ramp.iter().map(|&(position, _)| position).collect();
+    let mut paint = Paint::default();
+    paint.set_shader(Shader::linear_gradient(
+        (
+            Point::new(area.left, area.top),
+            Point::new(area.left, area.bottom),
+        ),
+        colors.as_slice(),
+        Some(positions.as_slice()),
+        TileMode::Clamp,
+        None,
+        None,
+    ));
+    canvas.draw_rect(area, &paint);
 }
 
 /// Paints a TSD.FillArchive: solid colour, gradient or image.
@@ -2024,20 +2115,29 @@ pub fn paint_fill(
     } else if let Some(gradient) = fill.message_opt(2) {
         paint_gradient(canvas, &gradient, path, bounds);
     } else if let Some(image) = fill.message_opt(3) {
-        // ImageFillArchive: technique 2, size 4, tint 3.
-        let Some(picture) = doc
+        // ImageFillArchive: technique 2, size 4, tint 3. A theme picture the package lacks is
+        // painted from its built-in ramp.
+        let picture = doc
             .read_data(fill_image_id(&image))
-            .and_then(|bytes| decode(&bytes))
-        else {
-            return;
+            .and_then(|bytes| decode(&bytes));
+        let ramp = match picture {
+            Some(_) => None,
+            None => theme_ramp(doc, &image),
         };
+        if picture.is_none() && ramp.is_none() {
+            return;
+        }
         canvas.save();
         canvas.clip_path(path, None, Some(true));
-        let size = image
-            .message_opt(4)
-            .filter(|size| size.float(1) > 0.0 && size.float(2) > 0.0)
-            .map(|size| (size.float(1), size.float(2)));
-        draw_image_fill(canvas, &picture, bounds, image.int(2), size);
+        if let Some(picture) = picture {
+            let size = image
+                .message_opt(4)
+                .filter(|size| size.float(1) > 0.0 && size.float(2) > 0.0)
+                .map(|size| (size.float(1), size.float(2)));
+            draw_image_fill(canvas, &picture, bounds, image.int(2), size);
+        } else if let Some(ramp) = ramp {
+            paint_ramp(canvas, ramp, bounds);
+        }
         // The tint colour is laid over the image at its alpha (measured: a 50% white tint washes a
         // photo background out, across 17 Keynote decks).
         if let Some(tint) = image
@@ -2220,6 +2320,13 @@ pub fn draw_image_fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_locators_ignore_the_size_suffix() {
+        assert!(ramp_for_locator("gradient/gradient_10x7").is_some());
+        assert!(ramp_for_locator("new_template5/chipboard_hd").is_some());
+        assert!(ramp_for_locator("unknown/unknown_hd").is_none());
+    }
 
     #[test]
     fn rect_helpers_match_skiasharp() {

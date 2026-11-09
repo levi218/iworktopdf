@@ -7,7 +7,9 @@ use crate::fonts;
 use crate::platform;
 use crate::styles::ctx;
 use serde_json::Value;
-use skia_safe::{Canvas, Font, FontMgr, FontStyle, Paint, Point, TextBlobBuilder, Typeface};
+use skia_safe::{
+    font_style, Canvas, Font, FontMgr, FontStyle, Paint, Point, TextBlobBuilder, Typeface,
+};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -129,6 +131,13 @@ fn kerning_for(font: &TaggedFont) -> Option<&'static HashMap<String, i32>> {
     tables().kerning.get(&font.name.to_lowercase())
 }
 
+/// A bundled clone whose own widths, kerning and ligatures are the original's: Carlito for
+/// Calibri ("Postscript" and the "ti" ligature in "adoption" match Apple's export to 0.1pt, where
+/// harvested pairs without ligatures are 2pt off).
+fn own_tables(font: &TaggedFont) -> bool {
+    font.font.typeface().family_name() == "Carlito"
+}
+
 /// Faces whose substitute already has the same advance widths.
 fn metric_compatible(postscript_name: &str) -> bool {
     let lower = postscript_name.to_lowercase();
@@ -153,7 +162,11 @@ fn metric_compatible(postscript_name: &str) -> bool {
 
 /// Apple's advance widths for fonts substituted by a face with different metrics.
 fn apple_widths_for(font: &TaggedFont) -> Option<&'static HashMap<String, f32>> {
-    if metric_compatible(&font.name) || fonts::is_exact(&font.name) {
+    // A same-width substitute only counts when one resolved: a face with none here falls back to
+    // Helvetica and takes Apple's widths (Calibri on a Mac: titles 10% too wide otherwise).
+    if fonts::is_exact(&font.name)
+        || (metric_compatible(&font.name) && !fonts::is_unknown_family(&font.name))
+    {
         return None;
     }
     tables()
@@ -194,24 +207,62 @@ fn fallback(primary: &Typeface, code_point: char) -> Option<Typeface> {
     found
 }
 
-/// Apple's cascade puts Hiragino Sans first for Japanese/CJK (measured: Helvetica Neue text with
-/// kana exports with HiraginoSans-W3). Used when that face is available.
+/// Apple's cascade for a character the styled face lacks (measured on Helvetica Neue and Gill
+/// Sans text): Han ideographs in PingFang SC ("日本語" without kana), kana, CJK punctuation,
+/// fullwidth forms and the Miscellaneous Symbols and Arrows block ("⬆") in Hiragino Sans. Used
+/// when those faces are available.
 fn cascade_font(primary: &Typeface, code_point: char) -> Option<Typeface> {
-    let cjk = matches!(
-        u32::from(code_point),
-        0x3000..=0x30FF | 0x3400..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF
-    );
-    if !cjk {
-        return None;
-    }
     let heavy = *primary.font_style().weight() >= 600;
-    let weight_face = if heavy {
-        "HiraginoSans-W6"
-    } else {
-        "HiraginoSans-W3"
+    let typeface = match u32::from(code_point) {
+        0x3400..=0x9FFF | 0xF900..=0xFAFF => {
+            let weight = if heavy {
+                font_style::Weight::SEMI_BOLD
+            } else {
+                font_style::Weight::NORMAL
+            };
+            let style = FontStyle::new(
+                weight,
+                font_style::Width::NORMAL,
+                font_style::Slant::Upright,
+            );
+            FontMgr::new().match_family_style("PingFang SC", style)?
+        }
+        0x2B00..=0x2BFF | 0x3000..=0x30FF | 0xFF00..=0xFFEF => {
+            let weight_face = if heavy {
+                "HiraginoSans-W6"
+            } else {
+                "HiraginoSans-W3"
+            };
+            fonts::user(weight_face).or_else(|| fonts::user("HiraginoSans-W3"))?
+        }
+        _ => return None,
     };
-    let typeface = fonts::user(weight_face).or_else(|| fonts::user("HiraginoSans-W3"))?;
     (typeface.unichar_to_glyph(code_point as i32) != 0).then_some(typeface)
+}
+
+/// PostScript names of the fallback faces a string's characters take (those its font lacks).
+///
+/// # Arguments
+///
+/// * `text` - The string
+/// * `font` - The tagged font it is set in
+///
+/// # Returns
+///
+/// Each fallback face's PostScript name once, in first-use order.
+pub fn fallback_faces(text: &str, font: &TaggedFont) -> Vec<String> {
+    let primary = font.font.typeface();
+    let mut names: Vec<String> = Vec::new();
+    for code_point in visible(text).chars() {
+        if code_point.is_whitespace() || font.font.unichar_to_glyph(code_point as i32) != 0 {
+            continue;
+        }
+        let name = fallback(&primary, code_point).and_then(|face| face.post_script_name());
+        if let Some(name) = name.filter(|name| !names.contains(name)) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn is_variation_selector(character: char) -> bool {
@@ -285,12 +336,18 @@ pub fn layout(text: &str, font: &TaggedFont) -> Shaped {
     }
     let size = font.font.size();
     let tracking = font.tracking * size;
-    if fonts::is_exact(&font.name) && faces.iter().all(Option::is_none) {
-        // The document's own font: shape with HarfBuzz so its kerning applies. Ligatures merge
-        // glyphs only in Pages documents that use them (measured: "fi" in Times narrows
-        // "bonafide" by 1pt, which decides where Pages breaks a justified line; Keynote's export
-        // keeps "f" and "i" apart).
-        if let Some(shaped) = shape_exact(&text, &font.font, ctx::LIGATURES.get()) {
+    if (fonts::is_exact(&font.name) || own_tables(font)) && faces.iter().all(Option::is_none) {
+        // The document's own font (or a clone with its tables): shape with HarfBuzz so its
+        // kerning applies. Ligatures apply to untracked text in Pages documents that use them
+        // (measured: "fi" in Times narrows "bonafide" by 1pt, which decides where Pages breaks a
+        // justified line; Keynote's export keeps "f" and "i" apart) and always in Carlito, whose
+        // "ti" matches Apple's Calibri.
+        let one_per_character = |shaped: &Shaped| shaped.glyphs.len() == glyphs.len();
+        let ligatures = font.tracking == 0.0 && (ctx::LIGATURES.get() || own_tables(font));
+        if let Some(shaped) = shape_exact(&text, &font.font, ligatures)
+            .filter(one_per_character)
+            .or_else(|| shape_exact(&text, &font.font, false).filter(one_per_character))
+        {
             let count = shaped.positions.len() as f32;
             let positions = shaped
                 .positions
@@ -400,19 +457,42 @@ fn shape_exact(text: &str, font: &Font, ligatures: bool) -> Option<Shaped> {
     let pair_kerning =
         |left: u16, right: u16| kerx.map_or(0.0, |table| kerx_kerning(table, left, right) as f32);
     let infos = shaped.glyph_infos();
+    // Callers place one glyph per character: a ligature takes its first character's slot and
+    // the characters it absorbed get blank (space) glyphs at its end, as Apple's export does.
+    let character_starts: Vec<usize> = text.char_indices().map(|(start, _)| start).collect();
+    let blank = font.unichar_to_glyph(' ' as i32);
+    let mut absorbed = Vec::with_capacity(infos.len());
+    for (index, info) in infos.iter().enumerate() {
+        let start = info.cluster as usize;
+        let end = infos
+            .get(index + 1)
+            .map_or(text.len(), |next| next.cluster as usize);
+        let characters = character_starts
+            .iter()
+            .filter(|&&offset| offset >= start && offset < end)
+            .count();
+        absorbed.push(characters.saturating_sub(1));
+    }
     let (mut glyphs, mut positions, mut pen) = (
-        Vec::with_capacity(infos.len()),
-        Vec::with_capacity(infos.len()),
+        Vec::with_capacity(character_starts.len()),
+        Vec::with_capacity(character_starts.len()),
         0f32,
     );
-    for (info, position) in infos.iter().zip(shaped.glyph_positions()) {
+    let mut previous = None;
+    for ((info, position), &extra) in infos.iter().zip(shaped.glyph_positions()).zip(&absorbed) {
         let glyph = info.glyph_id as u16;
-        if let Some(&previous) = glyphs.last() {
+        if let Some(previous) = previous {
             pen += pair_kerning(previous, glyph) * scale;
         }
+        previous = Some(glyph);
         glyphs.push(glyph);
         positions.push(pen + position.x_offset as f32 * scale);
         pen += position.x_advance as f32 * scale;
+        if extra > 0 && blank == 0 {
+            return None;
+        }
+        glyphs.extend(std::iter::repeat_n(blank, extra));
+        positions.extend(std::iter::repeat_n(pen, extra));
     }
     Some(Shaped {
         glyphs,
@@ -655,7 +735,47 @@ mod tests {
     }
 
     #[test]
-    fn kerx_pairs_are_kerned_and_ligatures_optional() {
+    fn cascade_matches_apples_cjk_and_arrow_faces() {
+        // Needs the installed Hiragino Sans (macOS).
+        if fonts::user("HiraginoSans-W3").is_none() {
+            return;
+        }
+        let font = TaggedFont {
+            font: Font::from_typeface(fonts::get(Some("GillSans"), false, false), 64.0),
+            name: "GillSans".into(),
+            tracking: 0.0,
+        };
+        assert_eq!(fallback_faces("Data Size ⬆", &font), ["HiraginoSans-W3"]);
+        assert!(fallback_faces("Data Size", &font).is_empty());
+        // Han ideographs take PingFang SC where the system has it; kana stay in Hiragino Sans.
+        let han = fallback_faces("日本語", &font);
+        assert!(han == ["PingFangSC-Regular"] || han == ["HiraginoSans-W3"]);
+        assert_eq!(fallback_faces("かな", &font), ["HiraginoSans-W3"]);
+    }
+
+    #[test]
+    fn calibri_takes_carlitos_ligatures_one_glyph_per_character() {
+        let typeface = fonts::get(Some("Calibri"), false, false);
+        // Needs the bundled Carlito (fonts/open); elsewhere Helvetica stands in.
+        if typeface.family_name() != "Carlito" {
+            return;
+        }
+        let font = TaggedFont {
+            font: Font::from_typeface(&typeface, 84.0),
+            name: "Calibri".into(),
+            tracking: 0.0,
+        };
+        // Apple's export sets "adoption" with the "ti" ligature, 307.6pt wide at 84pt.
+        let shaped = layout("adoption", &font);
+        assert_eq!(shaped.glyphs.len(), 8);
+        assert!((shaped.width - 307.66).abs() < 0.05);
+        // The ligature's second character is a blank at the ligature's end.
+        assert_eq!(shaped.glyphs[5], font.font.unichar_to_glyph(' ' as i32));
+        assert_eq!(shaped.positions[5], shaped.positions[6]);
+    }
+
+    #[test]
+    fn kerx_pairs_and_ligature_runs_are_kerned() {
         // Needs the installed Apple face (macOS); elsewhere a substitute is used instead.
         if !fonts::is_exact("Helvetica-Light") {
             return;
@@ -671,12 +791,14 @@ mod tests {
         assert!((unkerned - measure("Te", &font) - 0.111 * 46.0).abs() < 0.01);
         let unkerned = measure("Y", &font) + measure("o", &font);
         assert!((unkerned - measure("Yo", &font) - 0.092 * 46.0).abs() < 0.01);
-        // Without the document's ligature setting "f" and "i" stay apart; with it they merge.
-        // Either way the run after them is kerned.
-        for (ligatures, glyphs) in [(false, 4), (true, 3)] {
+        // Without the document's ligature setting "f" and "i" stay apart; with it they merge
+        // (the "i" becomes a blank). Either way the run after them is kerned.
+        let blank = font.font.unichar_to_glyph(' ' as i32);
+        for ligatures in [false, true] {
             ctx::LIGATURES.set(ligatures);
             let shaped = layout("fiTe", &font);
-            assert_eq!(shaped.glyphs.len(), glyphs);
+            assert_eq!(shaped.glyphs.len(), 4);
+            assert_eq!(shaped.glyphs[1] == blank, ligatures);
             assert!((shaped.width - measure("fi", &font) - measure("Te", &font)).abs() < 0.01);
         }
         ctx::LIGATURES.set(false);
