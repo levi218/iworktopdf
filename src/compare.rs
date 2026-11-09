@@ -440,7 +440,7 @@ fn write_overlay(
 /// Options of a comparison run.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// Where to write colour diff images of differing pages.
+    /// Where to write colour diff images of failing pages.
     pub diff_dir: Option<PathBuf>,
     /// Where to cache Apple's rendered pages.
     pub cache: Option<Cache>,
@@ -532,7 +532,7 @@ pub fn compare(
         let (visual, mask, mask_width, mask_height) =
             page_difference(&actual_capture, &expected_capture);
         let text = text_difference(&actual_capture.chars, &expected_capture.chars);
-        if let (Some(dir), true) = (&options.diff_dir, visual > 0.0) {
+        if let (Some(dir), true) = (&options.diff_dir, visual >= THRESHOLD) {
             write_overlay(
                 &dir.join(format!("{name}-p{}.png", index + 1)),
                 &expected_capture,

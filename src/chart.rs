@@ -59,7 +59,7 @@ const RIGHT_LABEL_GAP: f32 = 12.24;
 const LINE_WIDTH: f32 = 1.7309;
 
 /// Chart types (ChartArchive.type). Apple's PDF export draws the 3D types (12-19) flat, like
-/// their 2D counterparts, so they map to the same variants.
+/// their 2D counterparts, so they map to the same variants (see `ChartItem::flatten_3d`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChartType {
     Column,
@@ -155,9 +155,11 @@ impl ChartType {
         )
     }
 
-    /// The series style field holding the fill: bars 12, areas 11, others 13.
+    /// The series style field holding the colour: bars 12, areas 11, lines their stroke (48),
+    /// others 13.
     fn fill_field(self) -> i32 {
         match self {
+            ChartType::Line => 48,
             ChartType::Bar | ChartType::StackedBar => 12,
             ChartType::Area | ChartType::StackedArea => 11,
             _ => 13,
@@ -197,6 +199,12 @@ impl Plot {
     }
     fn height(&self) -> f32 {
         self.bottom - self.top
+    }
+    fn center_x(&self) -> f32 {
+        (self.left + self.right) / 2.0
+    }
+    fn center_y(&self) -> f32 {
+        (self.top + self.bottom) / 2.0
     }
 }
 
@@ -241,6 +249,162 @@ fn axis_paint() -> Paint {
     let mut axis = stroke_paint(Color::BLACK, 1.0);
     axis.set_stroke_cap(PaintCap::Square);
     axis
+}
+
+/// A set of `bars` side-by-side bars centred in a `slot`.
+///
+/// # Arguments
+///
+/// * `slot` - The space for the set (a category's band, or the whole plot)
+/// * `bars` - How many bars (0 counts as 1)
+/// * `bar_gap` - The gap between bars, as a fraction of a bar
+/// * `set_gap` - The gap around the set, as a fraction of a bar
+///
+/// # Returns
+///
+/// The bar thickness slot / (n + (n-1)·bar gap + set gap), and a function giving each bar's
+/// start relative to the slot's centre (`impl Fn` returns a closure; `move` copies the numbers it
+/// uses into it).
+fn bar_set(slot: f32, bars: usize, bar_gap: f32, set_gap: f32) -> (f32, impl Fn(usize) -> f32) {
+    let count = bars.max(1) as f32;
+    let bar = slot / (count + (count - 1.0) * bar_gap + set_gap);
+    let group = count * bar + (count - 1.0) * bar_gap * bar;
+    (bar, move |position: usize| {
+        -group / 2.0 + position as f32 * bar * (1.0 + bar_gap)
+    })
+}
+
+/// Per stored 3D type (12-15, 17-19), each edge of the flat chart's plot area (left, top, right, bottom) as
+/// `(m, n)`: edge = stored origin + m * stored size + n, on that edge's axis.
+// ponytail: an exact two-point fit per type (Keynote-made and generated donor charts, mapping
+// the stored 3D bounds to the plot area Apple draws, to 1pt); refit if more 3D charts turn up.
+const FLAT_3D_EDGES: [(i32, [(f32, f32); 4]); 7] = [
+    (
+        12,
+        [
+            (0.0727, 15.7),
+            (0.1596, -75.9),
+            (0.9161, 175.4),
+            (0.7727, 182.8),
+        ],
+    ),
+    (
+        13,
+        [
+            (0.1628, -137.4),
+            (0.2670, -154.9),
+            (0.9271, 39.6),
+            (1.0843, 41.6),
+        ],
+    ),
+    (
+        14,
+        [
+            (0.0490, -3.3),
+            (0.2246, -84.6),
+            (0.8838, 116.7),
+            (0.7302, 267.8),
+        ],
+    ),
+    (
+        15,
+        [
+            (0.0668, 5.2),
+            (0.1894, -80.2),
+            (0.9067, 131.0),
+            (0.7591, 220.8),
+        ],
+    ),
+    (
+        17,
+        [
+            (0.0735, 14.8),
+            (0.1566, -73.9),
+            (0.9476, 139.6),
+            (0.7785, 178.9),
+        ],
+    ),
+    (
+        18,
+        [
+            (0.1630, -137.6),
+            (0.2658, -154.2),
+            (0.9270, 39.6),
+            (1.0765, 46.1),
+        ],
+    ),
+    (
+        19,
+        [
+            (0.0636, 13.7),
+            (0.1603, -67.0),
+            (0.9365, 106.5),
+            (0.7607, 203.3),
+        ],
+    ),
+];
+
+/// The plot area (or pie square) Apple draws a flattened 3D chart in, from its stored frame.
+///
+/// A pie (16) fills a circle 0.9885 of the stored frame, its centre 2.16% of the frame right and
+/// 0.93% up (measured on 556pt and 766pt pies to 0.5pt); other kinds use `FLAT_3D_EDGES`.
+///
+/// # Arguments
+///
+/// * `stored_type` - The stored chart type (12-19)
+/// * `frame` - The stored drawable frame
+///
+/// # Returns
+///
+/// The frame to lay the flat chart out in (the stored one for an unknown type).
+fn flat_3d_frame(stored_type: i32, frame: Rect) -> Rect {
+    if stored_type == 16 {
+        let size = frame.width();
+        let diameter = size * 0.9885;
+        let center_x = frame.center_x() + size * 0.0216;
+        let center_y = frame.center_y() - size * 0.0093;
+        return Rect::from_xywh(
+            center_x - diameter / 2.0,
+            center_y - diameter / 2.0,
+            diameter,
+            diameter,
+        );
+    }
+    let Some((_, edges)) = FLAT_3D_EDGES.iter().find(|(kind, _)| *kind == stored_type) else {
+        return frame;
+    };
+    // Even edges run along x, odd ones along y.
+    let edge = |index: usize, origin: f32, size: f32| {
+        let (scale, offset) = edges[index];
+        origin + scale * size + offset
+    };
+    Rect::from_ltrb(
+        edge(0, frame.left(), frame.width()),
+        edge(1, frame.top(), frame.height()),
+        edge(2, frame.left(), frame.width()),
+        edge(3, frame.top(), frame.height()),
+    )
+}
+
+/// Keynote's sample data for a new chart of a kind: series names, category names and values by
+/// [series][category] (a pie: six months of one series; stacked kinds their own values).
+fn sample_data(chart_type: ChartType) -> (Vec<String>, Vec<String>, Vec<Vec<f64>>) {
+    const MONTHS: [&str; 6] = ["April", "May", "June", "July", "August", "September"];
+    let values = match chart_type {
+        ChartType::Pie => vec![vec![91.0, 76.0, 28.0, 26.0, 21.0, 18.0]],
+        chart_type if chart_type.stacked() => {
+            vec![vec![27.0, 36.0, 63.0, 143.0], vec![55.0, 43.0, 80.0, 48.0]]
+        }
+        _ => vec![vec![17.0, 26.0, 53.0, 96.0], vec![55.0, 43.0, 70.0, 58.0]],
+    };
+    let series = (1..=values.len())
+        .map(|index| format!("Region {index}"))
+        .collect();
+    let categories = MONTHS[..values[0].len()]
+        .iter()
+        .map(|&month| month.to_owned())
+        .collect();
+    (series, categories, values)
 }
 
 fn max_width<'a>(texts: impl Iterator<Item = &'a String>, font: &TaggedFont) -> f32 {
@@ -318,9 +482,10 @@ impl ChartItem {
                 series_styles[index] = entry.reference(2);
             }
         }
+        let stored_type = chart.int(1);
         let mut item = ChartItem {
             styles: styles.clone(),
-            chart_type: ChartType::from_stored(chart.int(1)),
+            chart_type: ChartType::from_stored(stored_type),
             frame: Rect::from_xywh(left, top, width, height),
             chart,
             series,
@@ -329,8 +494,20 @@ impl ChartItem {
             original_index: None,
             series_styles,
         };
-        item.read_linked_data();
+        if (12..=19).contains(&stored_type) {
+            item.flatten_3d();
+        } else {
+            item.read_linked_data();
+        }
         item
+    }
+
+    /// Apple's PDF export (Keynote 15) draws a 3D chart flat with Keynote's sample data for its
+    /// kind instead of the stored data (measured: 16 3D charts, Keynote-made and generated alike,
+    /// all showing these values), in the 2D frame given by `flat_3d_frame`.
+    fn flatten_3d(&mut self) {
+        (self.series, self.categories, self.values) = sample_data(self.chart_type);
+        self.frame = flat_3d_frame(self.chart.int(1), self.frame);
     }
 
     /// Re-reads the data from the cells the chart is linked to (TN.ChartMediatorArchive formulas:
@@ -492,6 +669,11 @@ impl ChartItem {
         self.style_float(self.chart.reference(9), 17)
             .unwrap_or(40.0)
             / 100.0
+    }
+
+    /// `bar_set` with this chart's gaps.
+    fn bar_set(&self, slot: f32, bars: usize) -> (f32, impl Fn(usize) -> f32) {
+        bar_set(slot, bars, self.bar_gap(), self.set_gap())
     }
 
     /// A value-axis label: the cached axis_type_y formatter (extension 10030) when it is more than a
@@ -778,11 +960,12 @@ impl ChartItem {
         }
     }
 
-    /// A two-axis line series' stroke width (series style 51): `None` when its stroke is empty
-    /// (markers only), the default width when the style sets none.
+    /// A line series' stroke width (series style 48; 51 on two-axis and mixed charts): `None`
+    /// when its stroke is empty (markers only), the default width when the style sets none.
     fn line_width(&self, series: usize) -> Option<f32> {
-        match self.style_property(self.series_style(series), 51) {
-            Some(props) => styles::stroke_of(Some(&props.message(51)), false).map(|s| s.width),
+        let field = if self.chart_type.is_combo() { 51 } else { 48 };
+        match self.style_property(self.series_style(series), field) {
+            Some(props) => styles::stroke_of(Some(&props.message(field)), false).map(|s| s.width),
             None => Some(LINE_WIDTH),
         }
     }
@@ -1118,7 +1301,7 @@ impl ChartItem {
                     canvas.draw_line(
                         (swatch_x, top + SWATCH / 2.0),
                         (swatch_x + SWATCH, top + SWATCH / 2.0),
-                        &stroke_paint(color, LINE_WIDTH),
+                        &stroke_paint(color, self.line_width(index).unwrap_or(LINE_WIDTH)),
                     );
                 }
                 _ => {
@@ -1254,15 +1437,18 @@ impl ChartItem {
         canvas.draw_line((plot.left, axis_y), (plot.right, axis_y), &axis_paint());
     }
 
-    /// A value axis's line (its style's field 25) up the plot edge at `x`.
-    fn draw_value_axis_line(&self, canvas: &Canvas, axis: usize, x: f32) {
-        let shown = self
-            .chart
+    /// True when a value axis's style shows its line (field 25).
+    fn shows_value_axis_line(&self, axis: usize) -> bool {
+        self.chart
             .references(13)
             .get(axis)
             .and_then(|&id| self.style_property(id, 25))
-            .is_some_and(|props| props.boolean(25));
-        if shown {
+            .is_some_and(|props| props.boolean(25))
+    }
+
+    /// A value axis's line up the plot edge at `x`, when its style shows it.
+    fn draw_value_axis_line(&self, canvas: &Canvas, axis: usize, x: f32) {
+        if self.shows_value_axis_line(axis) {
             let plot = self.plot();
             let axis_x = x.floor() + 0.5;
             canvas.draw_line((axis_x, plot.top), (axis_x, plot.bottom), &axis_paint());
@@ -1312,6 +1498,10 @@ impl ChartItem {
             }
             ChartType::Line => {
                 for series in 0..self.series.len() {
+                    // An empty stroke draws no line (`let ... else` skips the series).
+                    let Some(width) = self.line_width(series) else {
+                        continue;
+                    };
                     let points: Vec<Point> = (0..count)
                         .map(|category| {
                             Point::new(
@@ -1322,7 +1512,7 @@ impl ChartItem {
                         .collect();
                     canvas.draw_path(
                         &polyline(&points),
-                        &line_paint(self.series_color(series, 13)),
+                        &line_paint(self.series_color(series, 48), width),
                     );
                 }
             }
@@ -1350,10 +1540,8 @@ impl ChartItem {
         height_of: &dyn Fn(f64) -> f32,
     ) {
         let stacked = self.chart_type.stacked();
-        let bars = if stacked { 1 } else { self.series.len().max(1) };
-        let (bar_gap, set_gap) = (self.bar_gap(), self.set_gap());
-        let bar_width = slot / (bars as f32 + (bars as f32 - 1.0) * bar_gap + set_gap);
-        let group_width = bars as f32 * bar_width + (bars as f32 - 1.0) * bar_gap * bar_width;
+        let bars = if stacked { 1 } else { self.series.len() };
+        let (bar_width, offset) = self.bar_set(slot, bars);
         let bottom = self.plot().bottom;
         let label_style = self.value_label_style(Color::WHITE);
         let label_font = label_style.font();
@@ -1361,12 +1549,7 @@ impl ChartItem {
             let mut base = 0.0;
             for series in 0..self.series.len() {
                 let value = self.value(series, category);
-                let left = if stacked {
-                    category_x(category) - bar_width / 2.0
-                } else {
-                    category_x(category) - group_width / 2.0
-                        + series as f32 * bar_width * (1.0 + bar_gap)
-                };
+                let left = category_x(category) + offset(if stacked { 0 } else { series });
                 let lower = if stacked && series > 0 {
                     height_of(base)
                 } else {
@@ -1469,29 +1652,30 @@ impl ChartItem {
                 &value_style,
             );
         }
-        let slot = plot.height() / self.categories.len().max(1) as f32;
+        // The bars fill the plot less 1pt at the top and bottom, from 1pt right of the axis,
+        // every edge rounded to a whole point (measured: Apple's bar rectangles).
+        let slot = (plot.height() - 2.0) / self.categories.len().max(1) as f32;
         let stacked = self.chart_type.stacked();
-        let bars = if stacked { 1 } else { self.series.len().max(1) };
-        let bar_gap = self.bar_gap();
-        let bar_height = slot / (bars as f32 + (bars as f32 - 1.0) * bar_gap + self.set_gap());
-        let group_height = bars as f32 * bar_height + (bars as f32 - 1.0) * bar_gap * bar_height;
+        let bars = if stacked { 1 } else { self.series.len() };
+        let (bar_height, offset) = self.bar_set(slot, bars);
         let label_style = self.value_label_style(Color::WHITE);
         let label_font = label_style.font();
         for (category, name) in self.categories.iter().enumerate() {
-            let center_y = plot.top + (category as f32 + 0.5) * slot;
+            let center_y = plot.top + 1.0 + (category as f32 + 0.5) * slot;
             let mut base = 0.0;
             for series in 0..self.series.len() {
                 let value = self.value(series, category);
-                let top = if stacked {
-                    center_y - bar_height / 2.0
+                let top = center_y + offset(if stacked { 0 } else { series });
+                let start = if base == 0.0 {
+                    plot.left + 1.0
                 } else {
-                    center_y - group_height / 2.0 + series as f32 * bar_height * (1.0 + bar_gap)
+                    x_of(base)
                 };
                 let bar = Rect::new(
-                    x_of(base).ceil(),
-                    top.floor(),
-                    x_of(base + value),
-                    (top + bar_height).floor(),
+                    start.round(),
+                    top.round(),
+                    x_of(base + value).round(),
+                    (top + bar_height).round(),
                 );
                 canvas.draw_rect(bar, &paint(self.series_color(series, 12)));
                 if self.shows_values(series) {
@@ -1526,6 +1710,9 @@ impl ChartItem {
         }
         let axis_x = plot.left.floor() + 0.5;
         canvas.draw_line((axis_x, plot.top), (axis_x, plot.bottom), &axis_paint());
+        if self.shows_value_axis_line(0) {
+            self.draw_baseline(canvas);
+        }
     }
 
     /// A two-axis chart: line series with circle markers and column series, each on its axis; both
@@ -1604,14 +1791,10 @@ impl ChartItem {
         }
         let slot = plot.width() / count.max(1) as f32;
         let category_x = |index: usize| plot.left + (index as f32 + 0.5) * slot;
-        let bars = columns.len().max(1) as f32;
-        let bar_gap = self.bar_gap();
-        let bar_width = slot / (bars + (bars - 1.0) * bar_gap + self.set_gap());
-        let group_width = bars * bar_width + (bars - 1.0) * bar_gap * bar_width;
+        let (bar_width, offset) = self.bar_set(slot, columns.len());
         for category in 0..count {
             for (position, &series) in columns.iter().enumerate() {
-                let left = category_x(category) - group_width / 2.0
-                    + position as f32 * bar_width * (1.0 + bar_gap);
+                let left = category_x(category) + offset(position);
                 let bar = Rect::new(
                     left.floor(),
                     height_of(series, self.value(series, category)),
@@ -1636,9 +1819,7 @@ impl ChartItem {
             let color = self.series_color(series, self.color_field(series));
             let width = self.line_width(series);
             if let Some(width) = width {
-                let mut line = line_paint(color);
-                line.set_stroke_width(width);
-                canvas.draw_path(&polyline(&points), &line);
+                canvas.draw_path(&polyline(&points), &line_paint(color, width));
             }
             for point in points {
                 draw_marker(canvas, point, color, width.unwrap_or(LINE_WIDTH));
@@ -1878,16 +2059,18 @@ impl ChartItem {
                     &value_style,
                 );
             }
-            let slot = plot.height() / count.max(1) as f32;
-            let bar_height = slot / (1.0 + self.set_gap());
+            // The shown category's series form one set of bars across the plot (measured: four
+            // series draw 161pt bars 177.5pt apart in 760pt).
+            let (bar_height, offset) = self.bar_set(plot.height(), count);
             for (series, name) in self.series.iter().enumerate() {
-                let center_y = plot.top + (series as f32 + 0.5) * slot;
+                let top = plot.center_y() + offset(series);
+                let center_y = top + bar_height / 2.0;
                 if !self.categories.is_empty() {
                     let bar = Rect::new(
                         x_of(0.0).ceil(),
-                        (center_y - bar_height / 2.0).floor(),
+                        top.floor(),
                         x_of(first_value(series)),
-                        (center_y + bar_height / 2.0).floor(),
+                        (top + bar_height).floor(),
                     );
                     canvas.draw_rect(bar, &paint(self.series_color(series, 12)));
                 }
@@ -1911,15 +2094,15 @@ impl ChartItem {
         self.draw_value_axis(canvas, scale, &height_of, &|value| {
             self.axis_label(0, value)
         });
-        let slot = plot.width() / count.max(1) as f32;
-        let bar_width = slot / (1.0 + self.set_gap());
+        let (bar_width, offset) = self.bar_set(plot.width(), count);
         for (series, name) in self.series.iter().enumerate() {
-            let center_x = plot.left + (series as f32 + 0.5) * slot;
+            let left = plot.center_x() + offset(series);
+            let center_x = left + bar_width / 2.0;
             if !self.categories.is_empty() {
                 let bar = Rect::new(
-                    (center_x - bar_width / 2.0).floor(),
+                    left.floor(),
                     height_of(first_value(series)),
-                    (center_x + bar_width / 2.0).floor(),
+                    (left + bar_width).floor(),
                     plot.bottom.floor(),
                 );
                 canvas.draw_rect(bar, &paint(self.series_color(series, 13)));
@@ -2106,8 +2289,9 @@ impl ChartItem {
         }
     }
 
-    /// Donut labels sit in columns left/right of the ring with elbow leader lines (measured), in
-    /// black: the series name over the percentage.
+    /// Donut labels sit in columns left/right of the ring with elbow leader lines, in black: the
+    /// series name over the percentage. The elbow is 7.5pt + 5.19% of the radius past the ring and
+    /// the text 23.64% of the radius out (measured on 131pt and 380pt donuts to 0.5pt).
     fn draw_donut_label(&self, canvas: &Canvas, label: &PieLabel, radius: f32, style: &TextStyle) {
         let style = TextStyle {
             color: Color::BLACK,
@@ -2119,12 +2303,15 @@ impl ChartItem {
         let length = direction.length();
         let unit = Point::new(direction.x / length, direction.y / length);
         let ring = label.center + Point::new(unit.x * radius, unit.y * radius);
-        let elbow = label.center + Point::new(unit.x * (radius + 8.0), unit.y * (radius + 8.0));
+        // ponytail: two-point fit; refit if a third donut size disagrees.
+        let elbow_radius = radius * 1.0519 + 7.5;
+        let elbow = label.center + Point::new(unit.x * elbow_radius, unit.y * elbow_radius);
         let right_side = direction.x >= 0.0;
+        let column_offset = radius * 1.2364 - 7.0;
         let column_x = if right_side {
-            label.center.x + radius + 23.0
+            label.center.x + column_offset
         } else {
-            label.center.x - radius - 23.0
+            label.center.x - column_offset
         };
         canvas.draw_line(ring, elbow, &leader);
         canvas.draw_line(elbow, (column_x, elbow.y), &leader);
@@ -2202,8 +2389,8 @@ fn polyline(points: &[Point]) -> Path {
     path
 }
 
-fn line_paint(color: Color) -> Paint {
-    let mut line = stroke_paint(color, LINE_WIDTH);
+fn line_paint(color: Color, width: f32) -> Paint {
+    let mut line = stroke_paint(color, width);
     line.set_stroke_join(PaintJoin::Round);
     line
 }
@@ -2250,6 +2437,47 @@ mod tests {
         assert!(ChartType::from_stored(25).is_pie());
         assert!(ChartType::from_stored(7).horizontal() && ChartType::from_stored(7).stacked());
         assert_eq!(ChartType::from_stored(4).fill_field(), 11);
+        assert_eq!(ChartType::from_stored(3).fill_field(), 48);
+    }
+
+    #[test]
+    fn bar_sets_share_the_slot() {
+        // Arrange: four bars, 10% between bars, 40% around the set, in a 1200pt plot.
+        // Act
+        let (bar, offset) = bar_set(1200.0, 4, 0.1, 0.4);
+        // Assert: 1200 / 4.7 thick, 1.1 bars apart, centred on the slot.
+        assert!((bar - 255.319).abs() < 0.01);
+        assert!((offset(1) - offset(0) - bar * 1.1).abs() < 0.001);
+        assert!((offset(0) + offset(3) + bar).abs() < 0.001);
+    }
+
+    #[test]
+    fn flat_3d_charts_use_sample_data() {
+        let (series, categories, values) = sample_data(ChartType::Pie);
+        assert_eq!((series.len(), categories.len()), (1, 6));
+        assert_eq!(values[0][0], 91.0);
+        let (series, categories, values) = sample_data(ChartType::StackedArea);
+        assert_eq!(series, vec!["Region 1", "Region 2"]);
+        assert_eq!(categories, vec!["April", "May", "June", "July"]);
+        assert_eq!(values[0][3], 143.0);
+        assert_eq!(
+            sample_data(ChartType::Bar).2[0],
+            vec![17.0, 26.0, 53.0, 96.0]
+        );
+    }
+
+    #[test]
+    fn flat_3d_frames_map_to_apples_plot_area() {
+        // Keynote's 3D column: Apple draws its plot at 438,267 - 1555,937.
+        let stored = Rect::from_xywh(340.28, 236.51, 1134.53, 670.02);
+        let flat = flat_3d_frame(12, stored);
+        let expected = [438.0, 267.0, 1555.0, 937.0];
+        let actual = [flat.left(), flat.top(), flat.right(), flat.bottom()];
+        assert!(expected
+            .iter()
+            .zip(actual)
+            .all(|(e, a)| (e - a).abs() < 1.0));
+        assert_eq!(flat_3d_frame(5, stored), stored);
     }
 
     #[test]
