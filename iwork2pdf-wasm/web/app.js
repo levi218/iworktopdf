@@ -5,11 +5,12 @@ const status = document.getElementById("status");
 const result = document.getElementById("result");
 const preview = document.getElementById("preview");
 const download = document.getElementById("download");
-const localFontsButton = document.getElementById("local-fonts");
+const downloadOriginal = document.getElementById("download-original");
 const fontFiles = document.getElementById("font-files");
 const fontStatus = document.getElementById("font-status");
 const worker = new Worker("worker.js");
 let pdfUrl = null;
+let originalUrl = null;
 let busy = false;
 // Installed fonts (FontData), once the user allowed access.
 let localFonts = null;
@@ -107,6 +108,13 @@ async function convert(file) {
   const started = performance.now();
   const bytes = new Uint8Array(await file.arrayBuffer());
   let fontNote = "";
+  localFonts = await requestLocalFonts();
+  fontStatus.classList.toggle("warning", !localFonts);
+  fontStatus.textContent = localFonts
+    ? ""
+    : `Installed fonts are not available (${
+        canReadLocalFonts ? "permission not granted" : "not supported by this browser"
+      }): missing fonts are replaced with Nimbus Sans. You can add font files instead.`;
   if (localFonts) {
     const listed = await ask({ type: "fontNames", bytes });
     if (listed.named) {
@@ -120,11 +128,12 @@ async function convert(file) {
   busy = false;
   dropZone.removeAttribute("aria-busy");
   if (data.error) {
-    result.hidden = true;
+    result.hidden = preview.hidden = true;
     showStatus(`Could not convert ${file.name}: ${data.error}`, true);
     return;
   }
   if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+  if (originalUrl) URL.revokeObjectURL(originalUrl);
   pdfUrl = URL.createObjectURL(new Blob([data.pdf], { type: "application/pdf" }));
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   const pageWord = data.pages === 1 ? "page" : "pages";
@@ -132,7 +141,11 @@ async function convert(file) {
   preview.src = pdfUrl;
   download.href = pdfUrl;
   download.download = file.name.replace(/\.[^.]+$/, "") + ".pdf";
-  result.hidden = false;
+  // The source document too, to compare the PDF with Apple's own export.
+  originalUrl = URL.createObjectURL(file);
+  downloadOriginal.href = originalUrl;
+  downloadOriginal.download = file.name;
+  result.hidden = preview.hidden = false;
 }
 
 worker.onerror = (event) => {
@@ -141,26 +154,23 @@ worker.onerror = (event) => {
   showStatus(`The converter failed to load: ${event.message}`, true);
 };
 
-// Installed fonts: Chromium's Local Font Access API, which asks for permission on a click.
-if ("queryLocalFonts" in window) {
-  localFontsButton.hidden = false;
-  localFontsButton.addEventListener("click", async () => {
-    try {
-      localFonts = await window.queryLocalFonts();
-    } catch (error) {
-      localFonts = null;
-      fontStatus.textContent = `Font access was not granted (${error.message}); using Nimbus Sans.`;
-      return;
-    }
-    if (!localFonts.length) {
-      localFonts = null;
-      fontStatus.textContent = "Font access was not granted; using Nimbus Sans.";
-      return;
-    }
-    localFontsButton.disabled = true;
-    fontStatus.textContent = `${localFonts.length} installed fonts available.`;
+// Installed fonts (Chromium's Local Font Access API) are used by default. Asking needs a user
+// gesture until permission is granted, so the request starts when the drop zone is clicked; a
+// dropped file reuses a permission granted earlier. Not granted: retried on the next conversion.
+const canReadLocalFonts = "queryLocalFonts" in window;
+let localFontsRequest = null;
+function requestLocalFonts() {
+  if (!canReadLocalFonts) return Promise.resolve(null);
+  localFontsRequest ??= window.queryLocalFonts().then(
+    (fonts) => fonts.length ? fonts : null,
+    () => null,
+  );
+  return localFontsRequest.then((fonts) => {
+    if (!fonts) localFontsRequest = null;
+    return fonts;
   });
 }
+dropZone.addEventListener("click", requestLocalFonts);
 
 // Font files the user picks (any browser): matched by their PostScript names.
 fontFiles.addEventListener("change", async () => {
@@ -171,10 +181,20 @@ fontFiles.addEventListener("change", async () => {
   );
   for (const file of files) sentFonts.add(file.name);
   worker.postMessage({ type: "addFonts", files }, files.map((file) => file.bytes.buffer));
+  fontStatus.classList.remove("warning");
   fontStatus.textContent = `${files.length} font files added.`;
 });
 
 picker.addEventListener("change", () => convert(picker.files[0]));
+// The example deck: fetched from this site and converted like a chosen file.
+const exampleLink = document.getElementById("example");
+exampleLink.addEventListener("click", async (event) => {
+  event.preventDefault();
+  requestLocalFonts();
+  const response = await fetch(exampleLink.href);
+  const name = exampleLink.href.split("/").pop();
+  convert(new File([await response.blob()], name));
+});
 for (const type of ["dragenter", "dragover"]) {
   dropZone.addEventListener(type, (event) => {
     event.preventDefault();
