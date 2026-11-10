@@ -19,8 +19,9 @@ in this repository; missing faces fall back to installed families) are read from
 
 - `iwork2pdf/`: the logic layer, a library with no user interface. `render::render` turns an
   `iwa::IwaDocument::from_bytes` document into PDF bytes in memory; `render::convert` does it file
-  to file. The default `pdfium` feature rasterises pasted PDF artwork; build with
-  `--no-default-features` where native libraries cannot be loaded (e.g. WASM).
+  to file. The default `pdfium` feature rasterises pasted PDF artwork with PDFium; build with
+  `--no-default-features` where native libraries cannot be loaded (e.g. WASM), and the pure-Rust
+  hayro rasterises it instead.
 - `iwork2pdf-cli/`: the `iwork2pdf` command line (convert, batch, compare).
 
 ## Usage

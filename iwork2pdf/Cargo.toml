@@ -7,8 +7,8 @@ license.workspace = true
 
 [features]
 default = ["pdfium"]
-# Rasterise pasted PDF artwork with PDFium (dynamically loaded at run time); without it such
-# artwork is skipped. Off for targets that cannot load native libraries (WASM).
+# Rasterise pasted PDF artwork with PDFium (dynamically loaded at run time); without it hayro
+# does. Off for targets that cannot load native libraries (WASM).
 pdfium = ["dep:pdfium-render"]
 
 [dependencies]
@@ -16,6 +16,9 @@ pdfium = ["dep:pdfium-render"]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 # TIFF Deflate strips.
 flate2.workspace = true
+# Pure-Rust PDF rasteriser for pasted PDF artwork without the `pdfium` feature (WASM);
+# Apache-2.0 OR MIT, both compatible with GPL-3.0-or-later.
+hayro = "=0.9.0"
 # Knuth-Liang hyphenation (US English patterns) for Pages documents that hyphenate.
 hyphenation = { version = "0.8", features = ["embed_en-us"] }
 # Diagnostics; the front end chooses the logger.
