@@ -205,9 +205,8 @@ fn linear_sampling() -> SamplingOptions {
 
 // ------------------------------------------------------------------ images
 
-/// Decodes a picture: TIFF (built-in decoder), PDF (with the `pdfium` feature: rasterised by
-/// PDFium at up to 3x on a transparent background, the long side capped at 3000px), or anything
-/// Skia reads.
+/// Decodes a picture: TIFF (built-in decoder), PDF (page 1 rasterised by `rasterise_pdf`), or
+/// anything Skia reads.
 ///
 /// # Arguments
 ///
@@ -226,20 +225,94 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         };
         return raster(decoded.width, decoded.height, &decoded.rgba, alpha);
     }
-    // `#[cfg]` compiles the block only when the feature is on (like a build-time `if`).
-    #[cfg(feature = "pdfium")]
     if bytes.starts_with(b"%PDF") {
-        let pdfium = crate::pdfium::get()?;
-        let document = pdfium.load_pdf_from_byte_slice(bytes, None).ok()?;
-        let page = document.pages().get(0).ok()?;
-        let longest = page.width().value.max(page.height().value);
-        let dpi = (3000.0 / longest.max(1.0) * 72.0)
-            .clamp(24.0, 216.0)
-            .trunc();
-        let (width, height, rgba) = crate::pdfium::render(&page, dpi, None).ok()?;
-        return raster(width, height, &rgba, AlphaType::Unpremul);
+        return rasterise_pdf(bytes);
     }
     Image::from_encoded(Data::new_copy(bytes))?.make_raster_image(None, None)
+}
+
+/// The dpi pasted PDF artwork is rasterised at: up to 3x, the long side capped at 3000px.
+fn pdf_dpi((width, height): (f32, f32)) -> f32 {
+    (3000.0 / width.max(height).max(1.0) * 72.0)
+        .clamp(24.0, 216.0)
+        .trunc()
+}
+
+/// Rasterises page 1 of a PDF with PDFium at `pdf_dpi` on a transparent background.
+///
+/// # Arguments
+///
+/// * `bytes` - The PDF file's bytes
+///
+/// # Returns
+///
+/// An unpremultiplied raster image, or `None` when PDFium is missing or the PDF does not load.
+// `#[cfg]` compiles the item only when the condition holds (like a build-time `if`).
+#[cfg(feature = "pdfium")]
+fn rasterise_pdf(bytes: &[u8]) -> Option<Image> {
+    let pdfium = crate::pdfium::get()?;
+    let document = pdfium.load_pdf_from_byte_slice(bytes, None).ok()?;
+    let page = document.pages().get(0).ok()?;
+    let dpi = pdf_dpi((page.width().value, page.height().value));
+    let (width, height, rgba) = crate::pdfium::render(&page, dpi, None).ok()?;
+    raster(width, height, &rgba, AlphaType::Unpremul)
+}
+
+/// Rasterises page 1 of a PDF with hayro (pure Rust, so it also runs in WASM) at `pdf_dpi` on a
+/// transparent background. Used without the `pdfium` feature: on the acceptance set it matches
+/// PDFium on average but its anti-aliasing tips a few borderline pages over the threshold. Like
+/// PDFium, the pixel size is the rounded page size at that dpi and the page is stretched to fill
+/// it exactly, and text is not hinted.
+///
+/// # Arguments
+///
+/// * `bytes` - The PDF file's bytes
+///
+/// # Returns
+///
+/// A premultiplied raster image, or `None` when the PDF does not load or has no pages.
+#[cfg(not(feature = "pdfium"))]
+fn rasterise_pdf(bytes: &[u8]) -> Option<Image> {
+    // A trait method (`to_kurbo`) is only callable once its trait is imported.
+    use hayro::hayro_interpret::util::TransformExt;
+    use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources};
+
+    let pdf = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(bytes.to_vec())).ok()?;
+    let page = pdf.pages().first()?;
+    let (width, height) = page.render_dimensions();
+    let scale = pdf_dpi((width, height)) / 72.0;
+    let pixels = |points: f32| ((points * scale).round() as u16).max(1);
+    let (pixel_width, pixel_height) = (pixels(width), pixels(height));
+    let transform = hayro::kurbo::Affine::scale_non_uniform(
+        f64::from(pixel_width) / f64::from(width.max(f32::EPSILON)),
+        f64::from(pixel_height) / f64::from(height.max(f32::EPSILON)),
+    ) * page.initial_transform(true).to_kurbo();
+    let mut context = RenderContext::new(pixel_width, pixel_height);
+    hayro::render_into(
+        page,
+        &hayro::RenderCache::new(),
+        &hayro::hayro_interpret::InterpreterSettings::default(),
+        &hayro::RenderSettings {
+            hinting: false,
+            ..Default::default()
+        },
+        &mut context,
+        transform,
+    );
+    context.flush();
+    let mut pixmap = Pixmap::new(pixel_width, pixel_height);
+    // The default settings clear the target to transparent.
+    context.render_with(
+        &mut pixmap,
+        &mut Resources::default(),
+        RasterizerSettings::default(),
+    );
+    raster(
+        usize::from(pixel_width),
+        usize::from(pixel_height),
+        pixmap.data_as_u8_slice(),
+        AlphaType::Premul,
+    )
 }
 
 /// A raster image from RGBA pixels.
@@ -2389,5 +2462,31 @@ mod tests {
     fn padding_defaults() {
         assert_eq!(padding_inset(None, 1), 4.0);
         assert_eq!(padding_inset(Some(&Proto::empty()), 1), 0.0);
+    }
+
+    #[test]
+    fn pdf_dpi_caps_the_long_side_at_3000_pixels() {
+        assert_eq!(pdf_dpi((100.0, 50.0)), 216.0);
+        assert_eq!(pdf_dpi((1023.0, 474.0)), 211.0);
+        assert_eq!(pdf_dpi((20000.0, 10.0)), 24.0);
+    }
+
+    /// hayro sizes the image like PDFium (rounded) and keeps the transparent background.
+    #[cfg(not(feature = "pdfium"))]
+    #[test]
+    fn hayro_rasterises_page_one() {
+        // A 10.2 x 5pt page whose left half is opaque red; hayro rebuilds the missing xref table.
+        let pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+            3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 10.2 5]/Contents 4 0 R>>endobj\n\
+            4 0 obj<</Length 24>>stream\n1 0 0 rg 0 0 5 5 re f\nendstream endobj\n\
+            trailer<</Root 1 0 R>>\n%%EOF";
+        let image = decode(pdf).expect("a PDF page");
+        // 10.2pt at 216 dpi is 30.6px, rounded (not truncated) to 31.
+        assert_eq!((image.width(), image.height()), (31, 15));
+        let (_, _, rgba) = rgba_pixels(&image).expect("pixels");
+        let pixel = |x: usize, y: usize| &rgba[(y * 31 + x) * 4..][..4];
+        assert_eq!(pixel(2, 7), [255, 0, 0, 255]);
+        assert_eq!(pixel(28, 7)[3], 0);
     }
 }
