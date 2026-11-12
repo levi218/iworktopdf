@@ -1,0 +1,55 @@
+# Builds the WebAssembly demo (iwork2pdf-wasm/web) and publishes it to GitHub Pages.
+# Enable it once under Settings > Pages > Source: GitHub Actions.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+      # Pinned: src/sjlj.rs relies on Emscripten internals (setThrew, stack save/restore).
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 7.0.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch Nimbus Sans (not in the repository)
+        run: |
+          dir=iwork2pdf/fonts/open/nimbus-sans
+          mkdir -p "$dir"
+          base=https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/master
+          curl -fsSL -o "$dir/COPYING" "$base/COPYING"
+          for face in NimbusSans-{Regular,Bold,Italic,BoldItalic} \
+                      NimbusSansNarrow-{Regular,Bold,Oblique,BoldOblique}; do
+            curl -fsSL -o "$dir/$face.otf" "$base/fonts/$face.otf"
+          done
+      - run: iwork2pdf-wasm/build-web.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: iwork2pdf-wasm/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

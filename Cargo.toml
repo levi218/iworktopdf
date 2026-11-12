@@ -1,5 +1,5 @@
 [workspace]
-members = ["iwork2pdf", "iwork2pdf-cli"]
+members = ["iwork2pdf", "iwork2pdf-cli", "iwork2pdf-wasm"]
 resolver = "2"
 
 [workspace.package]

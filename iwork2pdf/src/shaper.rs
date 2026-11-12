@@ -4,6 +4,7 @@
 //! document's own face (supplied, or installed on macOS) is shaped with its own kerning.
 
 use crate::fonts;
+use crate::iwa::IwaDocument;
 use crate::platform;
 use crate::styles::ctx;
 use serde_json::Value;
@@ -207,37 +208,121 @@ fn fallback(primary: &Typeface, code_point: char) -> Option<Typeface> {
     found
 }
 
+/// A face of Apple's cascade: the font manager family to ask first (a system asset font that
+/// can only be reached that way), else the regular and heavy (semibold or bolder text) faces by
+/// PostScript name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CascadeFaces {
+    system_family: Option<&'static str>,
+    regular: &'static str,
+    heavy: &'static str,
+}
+
+/// Han ideographs ("日本語" without kana). Only through the font manager: macOS ships it as a
+/// variable font with Apple-only outlines ('hvgl') that FreeType cannot draw.
+const PING_FANG: CascadeFaces = CascadeFaces {
+    system_family: Some("PingFang SC"),
+    regular: "PingFangSC-Regular",
+    heavy: "PingFangSC-Semibold",
+};
+/// Han where PingFang is unavailable: the simplified Chinese build of Hiragino Sans (macOS).
+const HIRAGINO_GB: CascadeFaces = CascadeFaces {
+    system_family: None,
+    regular: "HiraginoSansGB-W3",
+    heavy: "HiraginoSansGB-W6",
+};
+/// Kana, CJK punctuation, fullwidth forms and the Miscellaneous Symbols and Arrows block ("⬆");
+/// also the JIS kanji where neither Chinese face is available.
+const HIRAGINO: CascadeFaces = CascadeFaces {
+    system_family: None,
+    regular: "HiraginoSans-W3",
+    heavy: "HiraginoSans-W6",
+};
+
+/// The cascade faces Apple sets a code point in when the styled face lacks it, in order of
+/// preference.
+fn cascade_faces(code_point: char) -> &'static [CascadeFaces] {
+    match u32::from(code_point) {
+        0x3400..=0x9FFF | 0xF900..=0xFAFF => &[PING_FANG, HIRAGINO_GB, HIRAGINO],
+        0x2B00..=0x2BFF | 0x3000..=0x30FF | 0xFF00..=0xFFEF => &[HIRAGINO],
+        _ => &[],
+    }
+}
+
 /// Apple's cascade for a character the styled face lacks (measured on Helvetica Neue and Gill
-/// Sans text): Han ideographs in PingFang SC ("日本語" without kana), kana, CJK punctuation,
-/// fullwidth forms and the Miscellaneous Symbols and Arrows block ("⬆") in Hiragino Sans. Used
-/// when those faces are available.
+/// Sans text): see `cascade_faces`. Used when those faces are installed or supplied.
 fn cascade_font(primary: &Typeface, code_point: char) -> Option<Typeface> {
     let heavy = *primary.font_style().weight() >= 600;
-    let typeface = match u32::from(code_point) {
-        0x3400..=0x9FFF | 0xF900..=0xFAFF => {
-            let weight = if heavy {
-                font_style::Weight::SEMI_BOLD
-            } else {
-                font_style::Weight::NORMAL
-            };
-            let style = FontStyle::new(
-                weight,
-                font_style::Width::NORMAL,
-                font_style::Slant::Upright,
-            );
-            FontMgr::new().match_family_style("PingFang SC", style)?
-        }
-        0x2B00..=0x2BFF | 0x3000..=0x30FF | 0xFF00..=0xFFEF => {
-            let weight_face = if heavy {
-                "HiraginoSans-W6"
-            } else {
-                "HiraginoSans-W3"
-            };
-            fonts::user(weight_face).or_else(|| fonts::user("HiraginoSans-W3"))?
-        }
-        _ => return None,
+    let weight = if heavy {
+        font_style::Weight::SEMI_BOLD
+    } else {
+        font_style::Weight::NORMAL
     };
-    (typeface.unichar_to_glyph(code_point as i32) != 0).then_some(typeface)
+    let style = FontStyle::new(
+        weight,
+        font_style::Width::NORMAL,
+        font_style::Slant::Upright,
+    );
+    // The first candidate with the glyph (WASM's empty font manager answers with a glyphless
+    // placeholder face).
+    let covers = |typeface: &Typeface| typeface.unichar_to_glyph(code_point as i32) != 0;
+    cascade_faces(code_point)
+        .iter()
+        .find_map(|faces| match faces.system_family {
+            Some(family) => FontMgr::new()
+                .match_family_style(family, style)
+                .filter(covers),
+            None => fonts::user(if heavy { faces.heavy } else { faces.regular })
+                .filter(covers)
+                .or_else(|| fonts::user(faces.regular).filter(covers)),
+        })
+}
+
+/// The faces worth supplying, beside the ones a document names, where no installed fonts can be
+/// found by name (WASM): Helvetica, which fonts missing here are set in, and the cascade faces
+/// for the CJK characters its text holds (those found by name; PingFang cannot be supplied).
+///
+/// # Arguments
+///
+/// * `doc` - The decoded document
+///
+/// # Returns
+///
+/// PostScript names, each face needed (not whole families: CJK families are large).
+///
+/// Text is read from text storages and table string lists; text found only elsewhere (chart
+/// labels) does not add cascade faces.
+pub fn document_fallback_faces(doc: &IwaDocument) -> Vec<&'static str> {
+    // TSWP.StorageArchive text (field 3), and TST.TableDataList entries (3) with their string (3)
+    // in the list and its segments (4).
+    let storages = doc
+        .of_type(2001)
+        .into_iter()
+        .flat_map(|storage| storage.body.strings(3));
+    let table_strings = doc.of_type(6005).into_iter().flat_map(|list| {
+        let segments = list
+            .body
+            .references(4)
+            .into_iter()
+            .filter_map(|id| doc.body(id));
+        std::iter::once(list.body.clone())
+            .chain(segments)
+            .flat_map(|holder| holder.messages(3))
+            .filter_map(|entry| entry.string(3))
+    });
+    let mut cascades: Vec<CascadeFaces> = Vec::new();
+    for text in storages.chain(table_strings) {
+        for faces in text.chars().flat_map(cascade_faces) {
+            if faces.system_family.is_none() && !cascades.contains(faces) {
+                cascades.push(*faces);
+            }
+        }
+    }
+    cascades
+        .into_iter()
+        .flat_map(|faces| [faces.regular, faces.heavy])
+        .chain(fonts::HELVETICA_FACES)
+        .collect()
 }
 
 /// PostScript names of the fallback faces a string's characters take (those its font lacks).
@@ -702,6 +787,14 @@ pub fn draw(canvas: &Canvas, text: &str, origin: Point, font: &TaggedFont, paint
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cascade_faces_by_script() {
+        assert_eq!(cascade_faces('日'), [PING_FANG, HIRAGINO_GB, HIRAGINO]);
+        assert_eq!(cascade_faces('か'), [HIRAGINO]);
+        assert_eq!(cascade_faces('Ａ'), [HIRAGINO]);
+        assert!(cascade_faces('a').is_empty());
+    }
 
     #[test]
     fn variation_selectors_are_invisible() {
