@@ -879,6 +879,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwork2pdf-wasm"
+version = "0.1.0"
+dependencies = [
+ "iwork2pdf",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"

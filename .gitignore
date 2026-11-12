@@ -1,3 +1,5 @@
 /target
 .DS_Store
 /iwork2pdf/fonts/open/
+/iwork2pdf-wasm/web/iwork2pdf-wasm.js
+/iwork2pdf-wasm/web/*.wasm

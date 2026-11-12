@@ -1,0 +1,276 @@
+/* Neutral zinc surfaces with one indigo accent: a quiet tool that gets out of the way.
+   Colours are defined once with light-dark(), which follows the color-scheme Pico sets for the
+   system theme and for data-theme="light" / "dark". */
+
+/* html:root[lang] outranks Pico's theme selectors, so these values win in every theme. */
+html:root[lang] {
+  --pico-font-family: "Geist", system-ui, sans-serif;
+  --pico-font-family-monospace: "Geist Mono", ui-monospace, monospace;
+  --pico-border-radius: 0.625rem;
+  --pico-background-color: light-dark(#fafafa, #09090b);
+  --pico-color: light-dark(#18181b, #f4f4f5);
+  --pico-h1-color: var(--pico-color);
+  --pico-muted-color: light-dark(#71717a, #a1a1aa);
+  --pico-muted-border-color: light-dark(#e4e4e7, #27272a);
+  --pico-primary: light-dark(#4f46e5, #a5b4fc);
+  --pico-primary-background: light-dark(#4f46e5, #6366f1);
+  --pico-primary-border: var(--pico-primary-background);
+  --pico-primary-hover: light-dark(#4338ca, #c7d2fe);
+  --pico-primary-hover-background: light-dark(#4338ca, #818cf8);
+  --pico-primary-hover-border: var(--pico-primary-hover-background);
+  --pico-primary-inverse: #fff;
+  --pico-primary-focus: light-dark(rgba(79, 70, 229, 0.25), rgba(129, 140, 248, 0.35));
+  --pico-secondary: light-dark(#3f3f46, #d4d4d8);
+  --pico-secondary-border: light-dark(#d4d4d8, #3f3f46);
+  --pico-secondary-hover: light-dark(#18181b, #fafafa);
+  --pico-secondary-hover-border: light-dark(#a1a1aa, #71717a);
+  --pico-card-background-color: var(--surface);
+  --pico-card-box-shadow: 0 1px 2px light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.4));
+  --surface: light-dark(#ffffff, #18181b);
+  --rule: light-dark(#e4e4e7, #27272a);
+  --warning: light-dark(#b45309, #fbbf24);
+  --space: 1.5rem;
+}
+
+body {
+  background: var(--pico-background-color);
+}
+
+/* One reading column for the whole page. */
+body > .container {
+  max-width: 52rem;
+}
+
+h1,
+.brand,
+.drop-title {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* ------------------------------------------------------------------ header */
+
+body > header {
+  padding-block: 0.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  font-size: 1.1rem;
+}
+
+.theme-toggle {
+  padding: 0.45rem;
+  line-height: 0;
+  border-color: var(--rule);
+}
+
+/* A half-filled disc: light and dark in one glyph. */
+.theme-icon {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+/* ------------------------------------------------------------------ intro */
+
+main {
+  padding-block: calc(var(--space) * 2) calc(var(--space) * 2.5);
+}
+
+.intro {
+  margin-bottom: calc(var(--space) * 1.5);
+}
+
+.intro h1 {
+  font-size: clamp(1.75rem, 5vw, 2.25rem);
+  margin-bottom: 0.5rem;
+}
+
+.intro p {
+  max-width: 36rem;
+}
+
+/* ------------------------------------------------------------------ input panel */
+
+.panel {
+  display: grid;
+  gap: var(--space);
+  margin: 0;
+  padding: var(--space);
+  border: 1px solid var(--rule);
+}
+
+.drop-zone {
+  position: relative;
+  display: grid;
+  gap: 0.4rem;
+  place-items: center;
+  margin: 0;
+  padding: 3rem 1rem;
+  text-align: center;
+  background: light-dark(#fafafa, #111113);
+  border: 1px dashed var(--pico-secondary-border);
+  border-radius: var(--pico-border-radius);
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.drop-zone:hover,
+.drop-zone:focus-within,
+.drop-zone.dragging {
+  border-color: var(--pico-primary);
+}
+
+.drop-zone.dragging {
+  background: var(--pico-primary-focus);
+}
+
+.drop-zone input {
+  /* The whole card is the control; keep the input reachable by keyboard and screen readers. */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.drop-title {
+  font-size: 1.1rem;
+  color: var(--pico-primary);
+}
+
+.drop-hint {
+  color: var(--pico-muted-color);
+  font-size: 0.875rem;
+}
+
+.panel-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+.example {
+  margin: 0;
+  color: var(--pico-muted-color);
+  font-size: 0.9rem;
+}
+
+.font-files {
+  position: relative;
+  margin: 0;
+}
+
+.font-files span {
+  margin: 0;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.875rem;
+}
+
+/* Visually hidden; the styled span is the visible control, the input keeps keyboard focus. */
+.font-files input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.font-files:focus-within span {
+  box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-primary-focus);
+}
+
+.notice {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  color: var(--pico-muted-color);
+  border-left: 3px solid var(--rule);
+  border-radius: 0.25rem;
+  background: light-dark(#f4f4f5, #1f1f23);
+}
+
+.notice:empty {
+  display: none;
+}
+
+.notice.warning {
+  color: var(--warning);
+  border-left-color: currentColor;
+}
+
+/* ------------------------------------------------------------------ output */
+
+.output {
+  margin-top: calc(var(--space) * 1.5);
+}
+
+.output-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+#status {
+  margin: 0;
+  font-weight: 500;
+}
+
+#status.error {
+  color: var(--pico-del-color);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.actions [role="button"] {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+}
+
+/* `display` would otherwise override the hidden attribute. */
+.actions[hidden] {
+  display: none;
+}
+
+#preview {
+  display: block;
+  width: 100%;
+  height: 80vh;
+  margin-top: var(--space);
+  border: 1px solid var(--rule);
+  border-radius: var(--pico-border-radius);
+  background: var(--surface);
+}
+
+#preview[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ footer */
+
+body > footer {
+  padding-block: var(--space);
+  border-top: 1px solid var(--rule);
+  color: var(--pico-muted-color);
+  font-size: 0.8rem;
+}
+
+body > footer p {
+  max-width: 44rem;
+  margin-bottom: 0.5rem;
+}
+
+body > footer p:last-child {
+  margin-bottom: 0;
+}

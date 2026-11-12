@@ -343,6 +343,15 @@ fn named_weight_and_slant(postscript_name: &str) -> (bool, bool) {
     (bold, italic)
 }
 
+/// The Helvetica faces fonts missing here are set in, as Apple does: regular, oblique, bold,
+/// bold oblique (index `2 * bold + italic`).
+pub const HELVETICA_FACES: [&str; 4] = [
+    "Helvetica",
+    "Helvetica-Oblique",
+    "Helvetica-Bold",
+    "Helvetica-BoldOblique",
+];
+
 fn resolve(postscript_name: &str, bold: bool, italic: bool) -> Typeface {
     // A bold/italic flag on a regular face name selects the family's bold/italic face.
     let has_style = postscript_name.contains('-')
@@ -393,13 +402,10 @@ fn resolve(postscript_name: &str, bold: bool, italic: bool) -> Typeface {
     // Lato, Karla, Ubuntu documents export so); Arial has Helvetica's widths. The real Helvetica,
     // when available, is what Apple itself falls back to.
     if family.is_none() {
-        let helvetica = match (bold, italic) {
-            (true, true) => "Helvetica-BoldOblique",
-            (true, false) => "Helvetica-Bold",
-            (false, true) => "Helvetica-Oblique",
-            (false, false) => "Helvetica",
-        };
-        if let Some(found) = user(helvetica) {
+        let helvetica = HELVETICA_FACES[usize::from(bold) * 2 + usize::from(italic)];
+        // Else its open clone (Nimbus Sans): the only text face where there is no font manager
+        // to ask (WASM).
+        if let Some(found) = user(helvetica).or_else(|| open_lookalike("Helvetica", bold, italic)) {
             return found;
         }
     }

@@ -160,6 +160,37 @@ fn paragraph_message(object: &IwaObject) -> Proto {
     }
 }
 
+/// The font a character or paragraph style names itself (character properties 11, font name 5).
+fn style_font_name(object: &IwaObject) -> Option<String> {
+    // TSWP.CharacterStyleArchive, ParagraphStyleArchive, TOCEntryStyleArchive.
+    matches!(object.typ, 2021 | 2022 | 2026)
+        .then(|| paragraph_message(object).message(11).string(5))
+        .flatten()
+}
+
+/// Every PostScript font name the document's text styles use, plus Helvetica Neue (the font of
+/// text with no font set), sorted and without duplicates.
+///
+/// # Arguments
+///
+/// * `doc` - The decoded document
+///
+/// # Returns
+///
+/// The names as stored ("HelveticaNeue-Bold"); bold and italic variants a style asks for by flag
+/// are not listed separately.
+pub fn font_names(doc: &IwaDocument) -> Vec<String> {
+    let mut names: Vec<String> = [2021, 2022, 2026]
+        .into_iter()
+        .flat_map(|typ| doc.of_type(typ))
+        .filter_map(style_font_name)
+        .chain(std::iter::once("HelveticaNeue".to_owned()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// TSS.StyleArchive.parent; TSWP shape and TOC entry styles nest their TSS super one level deeper.
 pub fn parent(object: &IwaObject) -> u64 {
     if object.typ == 2025 || object.typ == 2026 {
@@ -373,6 +404,31 @@ mod tests {
         let mut bytes = vec![number << 3 | 5];
         bytes.extend_from_slice(&value.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn style_font_name_reads_character_properties_of_text_styles() {
+        // Field 11 (character properties) holding field 5 (font name) = "Avenir-Book".
+        let font = b"Avenir-Book";
+        let mut props = vec![5 << 3 | 2, font.len() as u8];
+        props.extend_from_slice(font);
+        let mut body = vec![11 << 3 | 2, props.len() as u8];
+        body.extend(props);
+        let style = |typ| IwaObject {
+            id: 1,
+            typ,
+            body: parse(&body),
+        };
+        assert_eq!(
+            style_font_name(&style(2022)).as_deref(),
+            Some("Avenir-Book")
+        );
+        assert_eq!(
+            style_font_name(&style(2021)).as_deref(),
+            Some("Avenir-Book")
+        );
+        // Other archives may use field 11 for something else.
+        assert_eq!(style_font_name(&style(2025)), None);
     }
 
     #[test]
