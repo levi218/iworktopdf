@@ -17,7 +17,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;700&family=Geist+Mono:wght@400&display=swap"
     />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -37,45 +37,50 @@
       </nav>
     </header>
     <main class="container">
-      <hgroup>
-        <h1>iWork to PDF, on your device.</h1>
-        <p>
-          Pages, Numbers and Keynote documents are converted by WebAssembly in this tab. Your file
-          never leaves the browser.
-        </p>
+      <hgroup class="intro">
+        <h1>Convert iWork files to PDF</h1>
+        <p>Pages, Numbers and Keynote to PDF. Conversion runs in your browser; files are not uploaded.</p>
       </hgroup>
 
-      <label id="drop-zone" class="drop-zone" for="picker">
-        <span class="drop-title">Choose a document or drop it here</span>
-        <span class="drop-hint">.pages &middot; .numbers &middot; .key (single-file, iWork 2013 or later)</span>
-        <input id="picker" type="file" accept=".pages,.numbers,.key" />
-      </label>
-
-      <div class="font-controls">
-        <button id="local-fonts" class="secondary outline" type="button" hidden>
-          Use fonts installed on this device
-        </button>
-        <label class="font-files" for="font-files">
-          <span role="button" class="secondary outline">Add font files</span>
-          <input id="font-files" type="file" multiple accept=".ttf,.otf,.ttc,.otc" />
+      <article class="panel">
+        <label id="drop-zone" class="drop-zone" for="picker">
+          <span class="drop-title">Choose file</span>
+          <span class="drop-hint">or drop it here: .pages, .numbers, .key (iWork 2013 or later)</span>
+          <input id="picker" type="file" accept=".pages,.numbers,.key" />
         </label>
-        <small id="font-status" aria-live="polite"></small>
-      </div>
+        <div class="panel-row">
+          <p class="example">
+            No file at hand? <a id="example" href="example/beyond-the-visible.key">Try an example</a>
+            (a 3-slide Keynote deck).
+          </p>
+          <label class="font-files" for="font-files">
+            <span role="button" class="secondary outline">Add font files</span>
+            <input id="font-files" type="file" multiple accept=".ttf,.otf,.ttc,.otc" />
+          </label>
+        </div>
+        <p id="font-status" class="notice" aria-live="polite"></p>
+      </article>
 
-      <p id="status" role="status" aria-live="polite"></p>
-
-      <section id="result" hidden>
-        <a id="download" role="button" href="#">Download PDF</a>
-        <iframe id="preview" title="PDF preview"></iframe>
+      <section class="output">
+        <div class="output-bar">
+          <p id="status" role="status" aria-live="polite"></p>
+          <div id="result" class="actions" hidden>
+            <a id="download" role="button" href="#">Download PDF</a>
+            <a id="download-original" role="button" class="secondary outline" href="#">
+              Download original
+            </a>
+          </div>
+        </div>
+        <iframe id="preview" title="PDF preview" hidden></iframe>
       </section>
     </main>
     <footer class="container">
-      <small>
-        Fonts: the document's own fonts are used when you allow access to the fonts installed on
-        this device (Chrome and Edge) or add the font files; anything else is set in Nimbus Sans,
-        so line breaks can differ from Apple's export. Font files stay in this tab. Pasted PDF
-        artwork is skipped.
-      </small>
+      <p>
+        Fonts not available on this device (or added as files) are replaced with Nimbus Sans, so
+        line breaks can differ from Apple's export. Installed fonts are read in Chrome and Edge,
+        after you allow it. Pasted PDF artwork is skipped.
+      </p>
+      <p>Example deck: from IceWhaleTech/filens (MIT); photograph by Carsten (CC BY 2.0).</p>
     </footer>
     <script src="app.js"></script>
   </body>
