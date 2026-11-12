@@ -14,8 +14,10 @@ flate2 = "1.1"
 pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "sync"] }
 # CPU-bound parallelism.
 rayon = "1.10"
-# Drawing and the PDF backend (the same Skia SkiaSharp wraps).
-skia-safe = { version = "0.87", features = ["pdf"] }
+# Drawing and the PDF backend (the same Skia SkiaSharp wraps). `textlayout` builds Skia with
+# HarfBuzz, which the PDF backend needs to subset embedded fonts (without it every font, Apple Color
+# Emoji's 180 MB included, is embedded whole).
+skia-safe = { version = "0.87", features = ["pdf", "textlayout"] }
 thiserror = "2.0"
 
 [profile.release]

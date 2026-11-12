@@ -423,6 +423,9 @@ pub struct IwaDocument {
     files: Files,
     /// Data identifier → file name (TSP.PackageMetadata), built on first use.
     data_names: RefCell<Option<HashMap<u64, String>>>,
+    /// Decoded pictures by data identifier, so each is decoded once and every use shares one
+    /// `Image` (Skia's PDF backend writes an image once per unique `Image`).
+    images: RefCell<HashMap<u64, Option<skia_safe::Image>>>,
 }
 
 /// Reads every file of a zip archive into `files`.
@@ -566,6 +569,7 @@ impl IwaDocument {
             objects,
             files,
             data_names: RefCell::new(None),
+            images: RefCell::new(HashMap::new()),
         })
     }
 
@@ -650,6 +654,27 @@ impl IwaDocument {
         self.read_file(&format!("Data/{file}"))
             .or_else(|| self.read_file(file))
     }
+
+    /// The decoded picture of a data file (decoded on first use, then shared).
+    ///
+    /// # Arguments
+    ///
+    /// * `data_id` - A TSP.DataReference identifier
+    ///
+    /// # Returns
+    ///
+    /// The image, or `None` when the package does not carry the file or it does not decode.
+    pub fn image(&self, data_id: u64) -> Option<skia_safe::Image> {
+        if let Some(cached) = self.images.borrow().get(&data_id) {
+            // Cloning an `Image` only bumps a reference count.
+            return cached.clone();
+        }
+        let image = self
+            .read_data(data_id)
+            .and_then(|bytes| crate::drawables::decode(&bytes));
+        self.images.borrow_mut().insert(data_id, image.clone());
+        image
+    }
 }
 
 /// Decodes every Index/*.iwa archive into objects by identifier.
@@ -700,6 +725,32 @@ mod tests {
 
     fn parse(bytes: &[u8]) -> Proto {
         Proto::new(Rc::new(bytes.to_vec()), 0, bytes.len())
+    }
+
+    #[test]
+    fn image_decodes_once_and_stays_encoded() {
+        // Arrange: a package holding one JPEG as data 5.
+        let pixels = skia_safe::surfaces::raster_n32_premul((4, 4))
+            .expect("a 4x4 surface")
+            .image_snapshot();
+        let jpeg = pixels
+            .encode(None, skia_safe::EncodedImageFormat::JPEG, 90)
+            .expect("JPEG encoding");
+        let document = IwaDocument {
+            objects: HashMap::new(),
+            files: HashMap::from([("Data/a.jpg".to_owned(), Rc::new(jpeg.as_bytes().to_vec()))]),
+            data_names: RefCell::new(Some(HashMap::from([(5, "a.jpg".to_owned())]))),
+            images: RefCell::new(HashMap::new()),
+        };
+
+        // Act
+        let first = document.image(5).expect("the JPEG decodes");
+        let second = document.image(5).expect("the cached JPEG");
+
+        // Assert: one shared image (written once to a PDF) whose JPEG data is kept (DCTDecode).
+        assert_eq!(first.unique_id(), second.unique_id());
+        assert!(first.encoded_data().is_some());
+        assert!(document.image(6).is_none());
     }
 
     #[test]

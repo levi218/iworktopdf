@@ -214,7 +214,7 @@ fn linear_sampling() -> SamplingOptions {
 ///
 /// # Returns
 ///
-/// A raster image, or `None` when it does not decode.
+/// The image (formats Skia reads stay encoded until drawn), or `None` when it does not decode.
 pub fn decode(bytes: &[u8]) -> Option<Image> {
     if crate::tiff::is_tiff(bytes) {
         let decoded = crate::tiff::decode(bytes)?;
@@ -228,7 +228,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
     if bytes.starts_with(b"%PDF") {
         return rasterise_pdf(bytes);
     }
-    Image::from_encoded(Data::new_copy(bytes))?.make_raster_image(None, None)
+    // Kept lazily encoded: Skia's PDF backend then embeds JPEG data unchanged (DCTDecode).
+    Image::from_encoded(Data::new_copy(bytes))
 }
 
 /// The dpi pasted PDF artwork is rasterised at: up to 3x, the long side capped at 3000px.
@@ -395,10 +396,7 @@ impl ImageItem {
     fn decode_first(&self, fields: &[i32]) -> Option<Image> {
         fields.iter().find_map(|&field| {
             let id = self.image.message(field).uint(1);
-            let bytes = (id != 0)
-                .then(|| self.styles.doc().read_data(id))
-                .flatten()?;
-            decode(&bytes)
+            (id != 0).then(|| self.styles.doc().image(id)).flatten()
         })
     }
 
@@ -2139,10 +2137,7 @@ fn theme_ramp(doc: &IwaDocument, image: &Proto) -> Option<ThemeRamp> {
 /// Whether `paint_fill` can paint an ImageFillArchive: its picture is in the package and
 /// decodes, or it is a known Keynote theme picture.
 pub fn image_available(doc: &IwaDocument, image: &Proto) -> bool {
-    doc.read_data(fill_image_id(image))
-        .and_then(|bytes| decode(&bytes))
-        .is_some()
-        || theme_ramp(doc, image).is_some()
+    doc.image(fill_image_id(image)).is_some() || theme_ramp(doc, image).is_some()
 }
 
 /// Paints a theme ramp top to bottom over `area`.
@@ -2193,9 +2188,7 @@ pub fn paint_fill(
     } else if let Some(image) = fill.message_opt(3) {
         // ImageFillArchive: technique 2, size 4, tint 3. A theme picture the package lacks is
         // painted from its built-in ramp.
-        let picture = doc
-            .read_data(fill_image_id(&image))
-            .and_then(|bytes| decode(&bytes));
+        let picture = doc.image(fill_image_id(&image));
         let ramp = match picture {
             Some(_) => None,
             None => theme_ramp(doc, &image),
