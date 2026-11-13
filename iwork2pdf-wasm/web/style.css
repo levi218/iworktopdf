@@ -277,10 +277,39 @@ body > footer p:last-child {
 
 /* ------------------------------------------------------------------ links to the repository */
 
-.github-link {
+/* Header actions share one box height and centre their content, so the text link, the GitHub
+   icon and the theme button line up whatever the font's metrics. */
+body > header nav li {
+  display: flex;
+  align-items: center;
+}
+
+body > header nav li > a,
+body > header nav li > button {
   display: inline-flex;
-  padding: 0.45rem;
-  line-height: 0;
+  align-items: center;
+  justify-content: center;
+  height: 2.25rem;
+  margin: 0;
+  line-height: 1;
+}
+
+body > header nav li > a {
+  padding: 0 0.25rem;
+  white-space: nowrap;
+}
+
+.github-link {
+  width: 2.25rem;
+}
+
+.github-link svg {
+  display: block;
+}
+
+.theme-toggle {
+  width: 2.25rem;
+  padding: 0;
 }
 
 body > footer a {
