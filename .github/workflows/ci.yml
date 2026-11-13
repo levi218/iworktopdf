@@ -1,0 +1,27 @@
+# Builds and tests the workspace (the README's build status badge).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      # The WASM crate needs the Emscripten SDK; the Pages workflow builds it.
+      - run: cargo build --workspace --exclude iwork2pdf-wasm
+      - run: cargo test --workspace --exclude iwork2pdf-wasm

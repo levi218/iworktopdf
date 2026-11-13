@@ -1,7 +1,24 @@
 # iwork2pdf (Rust)
 
+[![Latest release](https://img.shields.io/github/v/release/levi218/iworktopdf?include_prereleases&sort=semver)](https://github.com/levi218/iworktopdf/releases/latest)
+[![CI](https://github.com/levi218/iworktopdf/actions/workflows/ci.yml/badge.svg)](https://github.com/levi218/iworktopdf/actions/workflows/ci.yml)
+[![Release](https://github.com/levi218/iworktopdf/actions/workflows/release.yml/badge.svg)](https://github.com/levi218/iworktopdf/actions/workflows/release.yml)
+[![Pages](https://github.com/levi218/iworktopdf/actions/workflows/pages.yml/badge.svg)](https://github.com/levi218/iworktopdf/actions/workflows/pages.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/github/license/levi218/iworktopdf)](LICENSE)
+
 Offline converter from Apple iWork documents (`.numbers`, `.key`, `.pages`) to PDF, a port of
 the C# `IWorkToPdf`. Pages are drawn with Skia and written by Skia's PDF backend.
+
+**[Try it in the browser](https://levi218.github.io/iworktopdf/)** (nothing is uploaded) ·
+[Download](https://github.com/levi218/iworktopdf/releases/latest) · [Changelog](CHANGELOG.md) ·
+[Report an issue](https://github.com/levi218/iworktopdf/issues)
+
+## Download
+
+Each [release](https://github.com/levi218/iworktopdf/releases) has the command line for Linux (x64), macOS (Apple silicon) and
+Windows (x64), with PDFium and the fonts it needs alongside, plus the browser demo as a static
+site. Unpack an archive and run `iwork2pdf convert doc.pages -o doc.pdf`; `iwork2pdf --version`
+prints the version.
 
 ## Setup
 
@@ -26,15 +43,16 @@ in this repository; missing faces fall back to installed families) are read from
 - `iwork2pdf-wasm/`: the WebAssembly entry point (`wasm32-unknown-emscripten`, since Skia cannot
   link to plain WASM) and `web/`, a page that converts, previews and downloads a document entirely
   in the browser. Text uses the device's installed fonts (Chrome, Edge) or font files the user
-  adds, else the embedded Nimbus Sans. `.github/workflows/pages.yml` publishes it to GitHub Pages
-  (Settings > Pages > Source: GitHub Actions).
+  adds, else the embedded Nimbus Sans. `.github/workflows/pages.yml` publishes it to
+  [GitHub Pages](https://levi218.github.io/iworktopdf/) (Settings > Pages > Source: GitHub Actions).
 
 ## Web demo
 
 ```bash
 rustup target add wasm32-unknown-emscripten
 source <emsdk>/emsdk_env.sh   # Emscripten SDK
-iwork2pdf-wasm/build-web.sh   # needs iwork2pdf/fonts/open/nimbus-sans/
+./fetch-nimbus-sans.sh        # iwork2pdf/fonts/open/nimbus-sans/
+iwork2pdf-wasm/build-web.sh
 python3 -m http.server -d iwork2pdf-wasm/web
 ```
 
@@ -70,6 +88,16 @@ Everything platform-specific lives in `iwork2pdf/src/platform/`:
 A page passes when its visual score is below 1%. `IWORK2PDF_PAGES=1` lists every page's scores.
 `--diff-dir` writes colour PNGs per failing page:
 expected | actual | faded expected with differences in magenta.
+
+## Releasing
+
+1. Move the `[Unreleased]` entries of `CHANGELOG.md` under a new `## [x.y.z] - <date>` heading
+   and set `version` in the root `Cargo.toml` to match.
+2. Commit, then tag and push: `git tag vx.y.z && git push origin vx.y.z`.
+
+`.github/workflows/release.yml` then builds the archives, publishes the release with that
+changelog section as its notes, and redeploys the GitHub Pages demo, whose footer shows the
+version. Tags with a hyphen (`v0.1.0-rc.1`) are marked as pre-releases.
 
 ## License
 
