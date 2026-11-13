@@ -1,5 +1,8 @@
 # Builds the WebAssembly demo (iwork2pdf-wasm/web) and publishes it to GitHub Pages.
 # Enable it once under Settings > Pages > Source: GitHub Actions.
+# Runs on every push to main, and release.yml runs it again (on main) once a version tag is
+# released, so the page names the version it was built from: the latest tag, plus the commits
+# since it when main is ahead.
 name: Pages
 
 on:
@@ -21,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the version shown on the page
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-emscripten
@@ -30,16 +35,16 @@ jobs:
           version: 7.0.0
       - uses: Swatinem/rust-cache@v2
       - name: Fetch Nimbus Sans (not in the repository)
-        run: |
-          dir=iwork2pdf/fonts/open/nimbus-sans
-          mkdir -p "$dir"
-          base=https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/master
-          curl -fsSL -o "$dir/COPYING" "$base/COPYING"
-          for face in NimbusSans-{Regular,Bold,Italic,BoldItalic} \
-                      NimbusSansNarrow-{Regular,Bold,Oblique,BoldOblique}; do
-            curl -fsSL -o "$dir/$face.otf" "$base/fonts/$face.otf"
-          done
+        run: ./fetch-nimbus-sans.sh
       - run: iwork2pdf-wasm/build-web.sh
+      - name: Stamp the version
+        run: |
+          if tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)"; then
+            version="$(git describe --tags --match 'v*')"
+            sed -i "/id=\"version\"/{s|/releases\"|/releases/tag/${tag}\"|; s|>dev<|>${version}<|}" \
+              iwork2pdf-wasm/web/index.html
+          fi
+          grep 'id="version"' iwork2pdf-wasm/web/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: iwork2pdf-wasm/web

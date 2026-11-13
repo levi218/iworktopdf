@@ -846,7 +846,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "iwork2pdf"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "flate2",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "iwork2pdf-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "iwork2pdf-wasm"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "iwork2pdf",
 ]
