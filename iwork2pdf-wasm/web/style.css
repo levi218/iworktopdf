@@ -274,3 +274,20 @@ body > footer p {
 body > footer p:last-child {
   margin-bottom: 0;
 }
+
+/* ------------------------------------------------------------------ links to the repository */
+
+.github-link {
+  display: inline-flex;
+  padding: 0.45rem;
+  line-height: 0;
+}
+
+body > footer a {
+  color: inherit;
+  text-decoration-color: var(--rule);
+}
+
+body > footer a:hover {
+  color: var(--pico-color);
+}

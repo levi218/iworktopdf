@@ -1,0 +1,135 @@
+# On a version tag (v*): builds the command line for Linux, macOS and Windows and the browser
+# demo, publishes them as a GitHub release whose notes are the tag's CHANGELOG.md section (plus
+# GitHub's generated list of pull requests), then redeploys the GitHub Pages demo so it names
+# the new version.
+#
+#   git tag v0.0.1 && git push origin v0.0.1
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: CLI (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-latest, exe: iwork2pdf, pdfium: libpdfium.so }
+          - { name: macos-arm64, os: macos-latest, exe: iwork2pdf, pdfium: libpdfium.dylib }
+          - { name: windows-x64, os: windows-latest, exe: iwork2pdf.exe, pdfium: pdfium.dll }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - name: Version from the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml && rm Cargo.toml.bak
+          grep '^version' Cargo.toml
+      - name: Build
+        run: CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release -p iwork2pdf-cli
+      - run: ./fetch-pdfium.sh
+      - run: ./fetch-nimbus-sans.sh
+      - name: Package
+        run: |
+          dir="iwork2pdf-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "$dir/fonts"
+          cp "target/release/${{ matrix.exe }}" "target/release/${{ matrix.pdfium }}" \
+             LICENSE README.md CHANGELOG.md "$dir/"
+          cp -R iwork2pdf/fonts/. "$dir/fonts/"
+          "$dir/${{ matrix.exe }}" --version
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$dir.zip" "$dir" > /dev/null
+          else
+            tar -czf "$dir.tar.gz" "$dir"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: iwork2pdf-*.*z*
+          if-no-files-found: error
+
+  web:
+    name: Browser demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+      # Pinned: src/sjlj.rs relies on Emscripten internals (setThrew, stack save/restore).
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 7.0.0
+      - uses: Swatinem/rust-cache@v2
+      - run: ./fetch-nimbus-sans.sh
+      - run: iwork2pdf-wasm/build-web.sh
+      - name: Package
+        run: |
+          sed -i "/id=\"version\"/{s|/releases\"|/releases/tag/${GITHUB_REF_NAME}\"|; s|>dev<|>${GITHUB_REF_NAME}<|}" \
+            iwork2pdf-wasm/web/index.html
+          dir="iwork2pdf-${GITHUB_REF_NAME}-web"
+          cp -R iwork2pdf-wasm/web "$dir"
+          cp LICENSE "$dir/"
+          zip -qr "$dir.zip" "$dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: iwork2pdf-*-web.zip
+          if-no-files-found: error
+
+  release:
+    needs: [cli, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      actions: write # rerun the Pages workflow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # history and tags, for the fallback commit list
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The lines between "## [<version>]" and the next "## [" heading.
+          awk -v v="$version" '
+            /^## \[/ { found = index($0, "## [" v "]") == 1; next }
+            found
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::warning::CHANGELOG.md has no section for ${version}; using the commit list"
+            previous="$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+            { echo "### Commits"; echo
+              git log --no-merges --format='- %s (%h)' ${previous:+"$previous.."}"${GITHUB_REF_NAME}"
+            } > notes.md
+          fi
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: iwork2pdf ${{ github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }} # e.g. v0.1.0-rc.1
+          files: dist/*
+          fail_on_unmatched_files: true
+      - name: Redeploy the GitHub Pages demo with the new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main

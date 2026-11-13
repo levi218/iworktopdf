@@ -21,6 +21,7 @@ USAGE
   iwork2pdf batch <src-dir> <out-dir> [--set <list.txt>] [--fonts <dir>]
   iwork2pdf compare <actual.pdf|dir> <expected.pdf|dir> [--set <list.txt>] [--diff-dir <dir>]
                     [--cache <dir>] [--procs <n>]
+  iwork2pdf --version
 
 DEBUG
   iwork2pdf render <pdf> <out-dir> [--dpi 72]     rasterise every page to PNG
@@ -96,6 +97,10 @@ fn run(raw: &[String]) -> Result<i32> {
         println!("{USAGE}");
         return Ok(0);
     };
+    if matches!(command.as_str(), "-V" | "--version" | "version") {
+        println!("iwork2pdf {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
     let arguments = Arguments::parse(&raw[1..])?;
     if let Some(dir) = arguments.option("fonts") {
         fonts::set_user_font_dir(dir);
